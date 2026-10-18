@@ -174,6 +174,22 @@ test('a click lists the calls, and a click on a call shows its whole input and o
   expect(await shown(second)).toBe('')
 })
 
+test("a click on a shown call's input or output folds it", async ($, on) => {
+  const clock = engine(on)
+  await call($, 'a', 'Bash')
+  await clock.settle()
+  const alone = await row($, 'a', 'Bash', { command: 'make test' })
+
+  await alone.press({ key: 'call' })
+  expect(await shown(alone)).toContain('line 1\nline 2')
+  await alone.press({ key: 'output.stdout' })
+  expect(await shown(alone)).not.toContain('line 1')
+
+  await alone.press({ key: 'call' })
+  await alone.press({ key: 'input:' })
+  expect(await shown(alone)).not.toContain('line 1')
+})
+
 test('an errored call is counted, and the end of a turn ends the calls left running', async ($, on) => {
   const clock = engine(on)
   await call($, 'a', 'Read')

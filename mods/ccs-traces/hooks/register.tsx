@@ -1,7 +1,7 @@
 // Draws each run of tool calls in the transcript (the calls Claude makes between two of its texts)
-// as one line, `● 5 tool calls · Read 3 · Bash 2`. A click on the line lists the calls, and a
-// click on a call shows its whole input and output. It draws only where clicks reach it: the
-// fullscreen terminal.
+// as one line, `● 5 tool calls · Read 3 · Bash 2`. A click on the line lists the calls, a click
+// on a call shows its whole input and output, and a click on them folds it again. It draws only
+// where clicks reach it: the fullscreen terminal.
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, RenderNode, Register, SessionMessage } from 'claude-code'
 
@@ -152,7 +152,8 @@ function label(tool: string, input: unknown, width: number): string {
   return name.length > width ? `${name.slice(0, Math.max(0, width - 1))}…` : name
 }
 
-type Draw = Pick<Elements['terminal'], 'Box' | 'Text'>
+/** The elements, and what a click on the drawn text does. */
+type Draw = Pick<Elements['terminal'], 'Box' | 'Text' | 'Button'> & { fold: () => void }
 
 const isLine = (value: unknown) =>
   (typeof value === 'string' && !value.includes('\n')) ||
@@ -160,12 +161,22 @@ const isLine = (value: unknown) =>
   typeof value === 'boolean' ||
   value === null
 
-/** `value` whole: text as it is, an object field by field, anything else as JSON. */
-function whole(value: unknown, draw: Draw): RenderNode {
+/** A line of a call's trace, named `key`: a click on it folds the call. */
+function line(draw: Draw, key: string, ...children: RenderNode[]): RenderNode {
+  const { Button, fold } = draw
+  return (
+    <Button key={key} plain onPress={fold}>
+      {children}
+    </Button>
+  )
+}
+
+/** `value` whole, at `at`: text as it is, an object field by field, anything else as JSON. */
+function whole(value: unknown, draw: Draw, at: string): RenderNode {
   const { Box, Text } = draw
-  if (typeof value === 'string') return <Text>{value}</Text>
+  if (typeof value === 'string') return line(draw, at, value)
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return <Text>{JSON.stringify(value, null, 2) ?? String(value)}</Text>
+    return line(draw, at, JSON.stringify(value, null, 2) ?? String(value))
   }
   // As JSON has it, a field that is undefined is not there.
   const fields = Object.entries(value).filter(([, field]) => field !== undefined)
@@ -173,14 +184,11 @@ function whole(value: unknown, draw: Draw): RenderNode {
     <Box flexDirection="column">
       {fields.map(([key, field]) =>
         isLine(field) ? (
-          <Text>
-            <Text dimColor>{key}: </Text>
-            {String(field)}
-          </Text>
+          line(draw, `${at}.${key}`, <Text dimColor>{key}: </Text>, String(field))
         ) : (
           <Box flexDirection="column">
-            <Text dimColor>{key}:</Text>
-            <Box marginLeft={2}>{whole(field, draw)}</Box>
+            {line(draw, `${at}.${key}:`, <Text dimColor>{key}:</Text>)}
+            <Box marginLeft={2}>{whole(field, draw, `${at}.${key}`)}</Box>
           </Box>
         ),
       )}
@@ -242,6 +250,8 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     if (!isFirst && !open) return <Box />
     const shown = open && (await read($, memberOf(isShown, e)))
+    const toggle = () => update($, memberOf(isShown, e), v => !v)
+    const draw = { Box, Text, Button, fold: toggle }
     const { isRunning, isErrored, isInterrupted, input, output } = e.props
     const bullet = (status: { isErrored: boolean; isRunning: boolean }) => (
       <Text color={status.isErrored ? 'error' : status.isRunning ? 'inactive' : 'success'}>● </Text>
@@ -259,7 +269,7 @@ export const register: Register = on => {
           </Button>
         )}
         {open && (
-          <Button key="call" plain onPress={() => update($, memberOf(isShown, e), v => !v)}>
+          <Button key="call" plain onPress={toggle}>
             {isAlone ? bullet({ isErrored: fails, isRunning }) : shown ? '  ▾ ' : '  ▸ '}
             {label(e.props.tool, input, e.viewport.columns - 8)}
             {isRunning && <Text dimColor> …</Text>}
@@ -268,11 +278,13 @@ export const register: Register = on => {
         )}
         {shown && (
           <Box flexDirection="column" marginLeft={4}>
-            <Text dimColor>input</Text>
-            <Box marginLeft={2}>{whole(input, { Box, Text })}</Box>
-            <Text dimColor>output</Text>
+            {line(draw, 'input:', <Text dimColor>input</Text>)}
+            <Box marginLeft={2}>{whole(input, draw, 'input')}</Box>
+            {line(draw, 'output:', <Text dimColor>output</Text>)}
             <Box marginLeft={2}>
-              {output === undefined ? <Text dimColor>(running)</Text> : whole(output, { Box, Text })}
+              {output === undefined
+                ? line(draw, 'output', <Text dimColor>(running)</Text>)
+                : whole(output, draw, 'output')}
             </Box>
           </Box>
         )}
