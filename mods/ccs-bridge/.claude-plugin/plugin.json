@@ -1,0 +1,6 @@
+{
+  "name": "ccs-bridge",
+  "version": "0.1.0",
+  "description": "Reports what an interactive Claude Code session does to the claude-screen (ccs) that runs it",
+  "author": { "name": "Ghassen" }
+}

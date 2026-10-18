@@ -1,0 +1,5 @@
+---
+source: crates/ccs/src/ui.rs
+expression: rule(70)
+---
+"── git diff · exited (exit 1) · Enter re-runs ── ctrl-space actions ──"

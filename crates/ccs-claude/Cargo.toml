@@ -1,0 +1,18 @@
+[package]
+name = "ccs-claude"
+description = "Claude Code session state from the ccs-bridge mod, and past sessions on disk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+etcetera.workspace = true
+
+[lints]
+workspace = true

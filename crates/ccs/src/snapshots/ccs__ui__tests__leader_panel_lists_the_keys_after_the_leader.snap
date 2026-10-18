@@ -1,0 +1,18 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"       ╭ ctrl-space ───────────────────╮"
+"       │        1-9 ➜ go to session    │"
+"       │          , ➜ previous session │"
+"       │          . ➜ next session     │"
+"       │          f ➜ find a session   │"
+"       │          c ➜ Chat             │"
+"       │          r ➜ review           │"
+"       │          s ➜ shell            │"
+"       │          [ ➜ previous tab     │"
+"       │          ] ➜ next tab         │"
+"       │      Enter ➜ reload tab       │"
+"       │          q ➜ quit             │"
+"       │ ctrl-space ➜ send to program  │"
+"       ╰ Esc cancel ───────────────────╯"

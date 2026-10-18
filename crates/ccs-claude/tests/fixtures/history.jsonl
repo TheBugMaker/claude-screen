@@ -1,0 +1,16 @@
+{"type":"mode","mode":"normal","sessionId":"history"}
+{"type":"permission-mode","permissionMode":"auto","sessionId":"history"}
+{"type":"user","uuid":"u0","parentUuid":null,"isMeta":true,"sessionId":"history","cwd":"/work","message":{"role":"user","content":"<local-command-caveat>Caveat: internal</local-command-caveat>"}}
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"history","cwd":"/work","isSidechain":false,"message":{"role":"user","content":"the login form rejects valid passwords"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"Look at the auth code.","signature":"x"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"a1","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"checkPassword"}}]}}
+{"type":"user","uuid":"u2","parentUuid":"a2","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"src/auth.ts:12"}]},"toolUseResult":{}}
+{"type":"assistant","uuid":"s1","parentUuid":"a2","sessionId":"history","cwd":"/work","isSidechain":true,"message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}
+{"type":"assistant","uuid":"a3","parentUuid":"u2","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"The hash comparison is inverted in src/auth.ts:12."}]}}
+{"type":"ai-title","aiTitle":"Login bug","sessionId":"history"}
+{"type":"user","uuid":"u3","parentUuid":"a3","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"role":"user","content":"<command-name>/cost</command-name>\n<command-message>cost</command-message>\n<command-args></command-args>"}}
+{"type":"user","uuid":"u4","parentUuid":"u3","sessionId":"history","cwd":"/work","isSidechain":false,"message":{"role":"user","content":"<local-command-stdout>Total cost: $0.12</local-command-stdout>"}}
+{"type":"user","uuid":"u5","parentUuid":"u4","sessionId":"history","cwd":"/work","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation..."}}
+{"type":"ai-title","aiTitle":"Fix the login bug","sessionId":"history"}
+{"type":"custom-title","customTitle":"login-bug","sessionId":"history"}
+{"type":"last-prompt","lastPrompt":"/cost","leafUuid":"u4","sessionId":"history"}

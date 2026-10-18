@@ -1,0 +1,5 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"── c Chat ── r review ✗ ── s shell ── git ──── ~/work/web ──"

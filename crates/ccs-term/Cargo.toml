@@ -1,0 +1,25 @@
+[package]
+name = "ccs-term"
+description = "PTY-backed terminal tabs rendered with ratatui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+tui-term.workspace = true
+tokio.workspace = true
+vt100.workspace = true
+portable-pty.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

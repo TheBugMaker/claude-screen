@@ -1,0 +1,7 @@
+{
+  "name": "ccs-traces",
+  "version": "0.1.0",
+  "description": "Folds each run of tool calls in the transcript into one line you can click open, down to a call's whole input and output",
+  "author": { "name": "Ghassen" },
+  "types": "./types/index.d.ts"
+}

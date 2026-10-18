@@ -1,0 +1,87 @@
+# Example ~/.config/ccs/config.toml
+#
+# Every Claude session gets a Chat tab plus the tabs below. Without any [[tab]], ccs uses
+# a `review` tab (git diff) and a `shell` tab ($SHELL). Commands run with `sh -c` in the
+# session's directory (its worktree, when it has one), with TERM=xterm-256color and:
+#
+#   CS_CWD         the session's directory
+#   CS_REPO        where the session started: the main checkout when it has a worktree
+#   CS_BRANCH      the branch checked out in CS_CWD
+#   CS_GIT_BASE    the commit the session's worktree started from
+#   CS_SESSION_ID  Claude's session id
+#
+# Each is empty when there is none, or before Claude reports it. For example:
+# command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
+#
+# Modes:
+#   eager      run every time the tab is opened
+#   lazy       run the first time the tab is opened (the default)
+#   regular    run in the background when the session starts, so it is up before the tab
+#              is opened
+#
+# Press the leader, then Enter, to run the tab's command again. Press Enter in a tab whose
+# command has exited to do the same.
+
+# Press the leader, then c / a tab's key / [ ] to switch tabs, 1-9 / , . to switch
+# sessions, f to find one, q to quit. Press it twice to send it to the program in the
+# tab, Claude included. A tab's key can't be one of these.
+leader = "ctrl-space"
+
+# Colors Claude, ccs and every tab. Built in: gruvbox-dark, gruvbox-light, tokyonight-night,
+# tokyonight-day. A file ~/.config/ccs/themes/<name>.json adds one, or replaces a built-in one
+# of that name. Without a theme, Claude keeps your own and the tabs your terminal's colors.
+# theme = "gruvbox-dark"
+
+# Switching sessions slides the new one in from the side its chip is on, over this many
+# milliseconds. 0 switches at once.
+slide_ms = 150
+
+# Each new session works in its own git worktree and branch (`claude --worktree`), so sessions
+# don't change each other's files. Its tabs run there too. Claude removes a worktree with nothing
+# in it when you /exit; ccs does the same when it closes a session another way. Sessions outside
+# git, or before the first commit, get none.
+worktree = true
+
+[[tab]]
+name = "review"
+key = "r"
+mode = "eager"
+command = "git diff"
+
+[[tab]]
+name = "shell"
+key = "s"
+mode = "regular"
+command = "$SHELL"
+
+[[tab]]
+name = "git"
+key = "g"
+command = "lazygit"
+
+# Planned, not parsed yet (ccs rejects these fields):
+#
+#   params     values asked for when the tab opens, each set as CS_<NAME> (CS_FILE, CS_FILTER)
+#   on_demand  ask for parameters every time the tab is opened
+#   on_change  re-run when Claude edits files or finishes a turn
+#   on_idle    run when the Chat tab goes idle
+#
+# [[tab]]
+# name = "diff"
+# key = "d"
+# mode = "on_change"
+# command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
+#
+# [[tab]]
+# name = "file"
+# key = "e"
+# mode = "on_demand"
+# params = [{ name = "file", picker = "changed_files" }]
+# command = "git --no-pager diff --color=always $CS_GIT_BASE -- \"$CS_FILE\" | less -R"
+#
+# [[tab]]
+# name = "tests"
+# key = "t"
+# mode = "on_demand"
+# params = [{ name = "filter", prompt = "test filter", default = "" }]
+# command = "cargo test $CS_FILTER"

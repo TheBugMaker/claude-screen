@@ -1,0 +1,21 @@
+[package]
+name = "ccs-core"
+description = "Domain model and configuration for claude-screen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+shell-words.workspace = true
+uuid.workspace = true
+etcetera.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

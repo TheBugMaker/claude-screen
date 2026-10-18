@@ -1,0 +1,16 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"                                                            "
+"                                                            "
+"      ╭ Find a session · open + past in /work/web ───╮      "
+"      │› user                                        │      "
+"      │›  1 ● Fix the login bug                      │      "
+"      │        › the login form rejects valid user na│      "
+"      │     · Add rate limiting · 3h ago             │      "
+"      │        › limit requests per user             │      "
+"      │                                              │      "
+"      ╰ ↑↓ select · Enter go · ⇧Tab open/all · Esc ca╯      "
+"                                                            "
+"                                                            "

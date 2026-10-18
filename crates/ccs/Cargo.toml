@@ -1,0 +1,39 @@
+[package]
+name = "ccs"
+description = "A terminal workspace for running and navigating many Claude Code sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ccs"
+path = "src/main.rs"
+
+[dependencies]
+ccs-core.workspace = true
+ccs-claude.workspace = true
+ccs-term.workspace = true
+ratatui.workspace = true
+frizbee.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+notify.workspace = true
+clap.workspace = true
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true
