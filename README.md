@@ -80,7 +80,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 
 ### Themes
 - [x] One theme file colors Claude, ccs, the mods and every tab
-- [x] Built in: gruvbox and Tokyo Night, dark and light
+- [x] Built in: gruvbox and Tokyo Night (dark and light), GitHub Dark, One Dark
 - [x] Your own themes, or other people's, in `~/.config/ccs/themes`
 
 ## Usage
@@ -134,7 +134,7 @@ Leader `m` does nothing while Claude is working, waiting for you, or waiting on 
 
 ## Themes
 
-Set `theme = "gruvbox-dark"` in `~/.config/ccs/config.toml`. The built-in themes are `gruvbox-dark`, `gruvbox-light`, `tokyonight-night` and `tokyonight-day` (in [`themes`](themes)). Without a theme, Claude draws in your own Claude theme and the tabs in your terminal's colors.
+Set `theme = "gruvbox-dark"` in `~/.config/ccs/config.toml`. The built-in themes are `gruvbox-dark`, `gruvbox-light`, `tokyonight-night`, `tokyonight-day`, `github-dark` and `one-dark` (in [`themes`](themes)). Without a theme, Claude draws in your own Claude theme and the tabs in your terminal's colors.
 
 A theme is a [Claude Code theme file](themes/gruvbox-dark.json) with a `ccs` section:
 

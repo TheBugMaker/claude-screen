@@ -32,8 +32,9 @@
 leader = "ctrl-space"
 
 # Colors Claude, ccs and every tab. Built in: gruvbox-dark, gruvbox-light, tokyonight-night,
-# tokyonight-day. A file ~/.config/ccs/themes/<name>.json adds one, or replaces a built-in one
-# of that name. Without a theme, Claude keeps your own and the tabs your terminal's colors.
+# tokyonight-day, github-dark, one-dark. A file ~/.config/ccs/themes/<name>.json adds one, or
+# replaces a built-in one of that name. Without a theme, Claude keeps your own and the tabs your
+# terminal's colors.
 # theme = "gruvbox-dark"
 
 # Switching sessions slides the new one in from the side its chip is on, over this many
