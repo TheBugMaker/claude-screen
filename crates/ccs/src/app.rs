@@ -1019,14 +1019,24 @@ impl App {
                     }
                 }
                 // Scrolling sideways, as a touchpad swipe does, goes to the session beside this one.
-                if let MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight = mouse.kind {
+                // So does Shift+scroll, as Ghostty on Linux keeps sideways scrolling for its tabs.
+                let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                let next = match mouse.kind {
+                    MouseEventKind::ScrollRight => Some(true),
+                    MouseEventKind::ScrollDown if shift => Some(true),
+                    MouseEventKind::ScrollLeft => Some(false),
+                    MouseEventKind::ScrollUp if shift => Some(false),
+                    _ => None,
+                };
+                if let Some(next) = next {
                     let same_swipe = self.last_swipe.is_some_and(|t| t.elapsed() < SWIPE_GAP);
                     self.last_swipe = Some(Instant::now());
                     if !same_swipe {
                         let last = self.views.len() - 1;
-                        self.active = match mouse.kind {
-                            MouseEventKind::ScrollRight => (self.active + 1).min(last),
-                            _ => self.active.saturating_sub(1),
+                        self.active = if next {
+                            (self.active + 1).min(last)
+                        } else {
+                            self.active.saturating_sub(1)
                         };
                     }
                     return;
@@ -2079,6 +2089,36 @@ mod tests {
         pause(&mut app);
         scroll(&mut app, MouseEventKind::ScrollLeft);
         assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn shift_scrolling_goes_one_session_a_swipe() {
+        let cwd = std::env::temp_dir();
+        let mut app = app();
+        for key in 0..3 {
+            app.views.push(view(key, cwd.clone()));
+        }
+        let scroll = |app: &mut App, kind, modifiers| {
+            app.on_terminal(Event::Mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 10,
+                modifiers,
+            }));
+        };
+        let pause = |app: &mut App| *app.last_swipe.as_mut().unwrap() -= SWIPE_GAP;
+        scroll(&mut app, MouseEventKind::ScrollDown, KeyModifiers::SHIFT);
+        assert_eq!(app.active, 1);
+        // The rest of the same swipe.
+        scroll(&mut app, MouseEventKind::ScrollDown, KeyModifiers::SHIFT);
+        assert_eq!(app.active, 1);
+        pause(&mut app);
+        scroll(&mut app, MouseEventKind::ScrollUp, KeyModifiers::SHIFT);
+        assert_eq!(app.active, 0);
+        // Without Shift the wheel scrolls, and stays in the session.
+        pause(&mut app);
+        scroll(&mut app, MouseEventKind::ScrollDown, KeyModifiers::NONE);
+        assert_eq!(app.active, 0);
     }
 
     #[test]
