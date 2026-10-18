@@ -39,6 +39,11 @@ const BUILT_IN: &[(&str, &str)] = &[
         "tokyonight-day",
         include_str!("../../../themes/tokyonight-day.json"),
     ),
+    (
+        "github-dark",
+        include_str!("../../../themes/github-dark.json"),
+    ),
+    ("one-dark", include_str!("../../../themes/one-dark.json")),
 ];
 
 /// Claude's base themes. It takes `dark` for any other.
