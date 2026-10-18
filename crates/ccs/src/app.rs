@@ -44,6 +44,8 @@ const MODS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../mods");
 const TYPED_WITHIN: Duration = Duration::from_secs(1);
 /// Lines moved by one mouse-wheel notch.
 const WHEEL_STEP: u16 = 3;
+/// A sideways scroll this soon after the last one is the same swipe, which goes one session.
+const SWIPE_GAP: Duration = Duration::from_millis(200);
 /// How long the leader waits for the next key before showing what it can be, as which-key does.
 const LEADER_PANEL_DELAY: Duration = Duration::from_millis(200);
 /// How often a slide between sessions is drawn: about 60 times a second.
@@ -90,6 +92,8 @@ pub struct App {
     quit: bool,
     /// When leader q was refused because a merge runs: again soon after, it quits.
     quit_refused: Option<Instant>,
+    /// When the last sideways scroll came, to take a swipe's many as one.
+    last_swipe: Option<Instant>,
     /// How the last Claude failed, when that is why ccs quits.
     failure: Option<color_eyre::Report>,
 }
@@ -376,6 +380,7 @@ impl App {
             slide: None,
             quit: false,
             quit_refused: None,
+            last_swipe: None,
             failure: None,
         }
     }
@@ -1007,6 +1012,19 @@ impl App {
                         self.select_tab(tab);
                         return;
                     }
+                }
+                // Scrolling sideways, as a touchpad swipe does, goes to the session beside this one.
+                if let MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight = mouse.kind {
+                    let same_swipe = self.last_swipe.is_some_and(|t| t.elapsed() < SWIPE_GAP);
+                    self.last_swipe = Some(Instant::now());
+                    if !same_swipe {
+                        let last = self.views.len() - 1;
+                        self.active = match mouse.kind {
+                            MouseEventKind::ScrollRight => (self.active + 1).min(last),
+                            _ => self.active.saturating_sub(1),
+                        };
+                    }
+                    return;
                 }
                 let area = ui::terminal_area(self.window);
                 let view = &mut self.views[self.active];
@@ -2023,6 +2041,39 @@ mod tests {
         // Back to Chat.
         click(&mut app, 3, 1);
         assert_eq!(app.views[1].tab, 0);
+    }
+
+    #[test]
+    fn swiping_sideways_goes_one_session_a_swipe() {
+        let cwd = std::env::temp_dir();
+        let mut app = app();
+        for key in 0..3 {
+            app.views.push(view(key, cwd.clone()));
+        }
+        let scroll = |app: &mut App, kind| {
+            app.on_terminal(Event::Mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let pause = |app: &mut App| *app.last_swipe.as_mut().unwrap() -= SWIPE_GAP;
+        scroll(&mut app, MouseEventKind::ScrollRight);
+        assert_eq!(app.active, 1);
+        // The rest of the same swipe.
+        scroll(&mut app, MouseEventKind::ScrollRight);
+        assert_eq!(app.active, 1);
+        pause(&mut app);
+        scroll(&mut app, MouseEventKind::ScrollRight);
+        assert_eq!(app.active, 2);
+        // The last session is as far as it goes.
+        pause(&mut app);
+        scroll(&mut app, MouseEventKind::ScrollRight);
+        assert_eq!(app.active, 2);
+        pause(&mut app);
+        scroll(&mut app, MouseEventKind::ScrollLeft);
+        assert_eq!(app.active, 1);
     }
 
     #[test]
