@@ -48,6 +48,8 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] If none is waiting, open a new session in the same project
 - [x] Never switch while you are typing: only right after your own key, in the session on screen
 - [x] Allowing a tool in Claude's permission dialog also advances; denying stays
+- [x] leader w submits and stays; leader Enter submits and opens a new session without a worktree, even if another one is waiting
+- [x] leader n / N opens a new session, in a worktree of its own / without one
 
 ### M3: Session panel and navigation
 - [x] leader f opens fuzzy finder panel to navigate between sessions
@@ -83,7 +85,7 @@ ccs --resume <SESSION_ID> # resume a past Claude Code session in its directory
 
 | Key | Action |
 |---|---|
-| Any key in the Chat tab | Goes to Claude, Ctrl-C included. Submitting a prompt, or allowing a tool, takes you to the session that needs you most (or a new one) |
+| Any key in the Chat tab | Goes to Claude, Ctrl-C included. Submitting a prompt, or allowing a tool, takes you to the session that needs you most (or a new one). To stay, or to go to a new session without a worktree, submit with leader w or leader Enter instead |
 | `/exit`, or Ctrl-C twice, in Claude | Closes the session and its tabs; after the last one, ccs exits. If Claude failed, ccs says how |
 | Any key in a terminal tab | Goes to the program, Ctrl-C included |
 | Enter (in a tab whose command exited) | Run it again |
@@ -97,10 +99,12 @@ Everything else starts with the leader, Ctrl-Space, then one key:
 | (wait) | A panel lists the keys that can follow and what they do; Esc closes it |
 | `1`–`9` | Go to session 1–9 |
 | `,` / `.` | Previous / next session |
+| `n` / `N` | Open a new session in this project: in a worktree of its own (unless `worktree = false`) / in the main checkout, without a worktree |
 | `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
 | `c` / a tab's key | Go to the Chat tab / that tab |
 | `[` / `]` | Previous / next tab |
-| Enter | Run the tab's command again, stopping it first if it is still running |
+| Enter | In the Chat tab: submit the prompt, then open a new session in the main checkout, without a worktree, even if another one is waiting. In a terminal tab: run the tab's command again, stopping it first if it is still running |
+| `w` | In the Chat tab: submit the prompt and stay |
 | `q` | Quit |
 | Ctrl-Space | Send Ctrl-Space to the program in the tab, Claude included |
 

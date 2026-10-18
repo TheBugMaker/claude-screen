@@ -103,8 +103,8 @@ pub struct View {
     pub session: Session,
     /// Claude, in the Chat tab.
     pub claude: Tab,
-    /// When the last key went to `claude`.
-    last_key: Option<Instant>,
+    /// When the last key went to `claude`, and what a prompt it submits does next.
+    last_key: Option<(Instant, Then)>,
     /// Peer tabs, from the config.
     pub tabs: Vec<Tab>,
     /// The tab on screen: 0 is Chat, then `tabs[tab - 1]`.
@@ -200,6 +200,18 @@ impl View {
         }
         false
     }
+}
+
+/// What a prompt you submit, or a tool you allow, does next.
+#[derive(Clone, Copy)]
+enum Then {
+    /// Goes to the session that needs you most, or a new one: Enter.
+    Advance,
+    /// Stays on the session: leader w.
+    Stay,
+    /// Opens a new session where this one started, without a worktree, even if another one
+    /// waits: leader Enter.
+    OpenPlain,
 }
 
 /// A worktree ccs asked Claude to make: `claude --worktree <name>`.
@@ -302,16 +314,21 @@ impl App {
         }
     }
 
-    /// Starts a session in `repo`, or resumes `past` from there, and shows it. A new session is
-    /// the spare Claude when it is in `repo`, unless that has moved on to another commit since.
-    pub fn open(&mut self, repo: &Path, past: Option<&PastSession>) -> color_eyre::Result<()> {
+    /// Starts a session in `repo`, or resumes `past` from there, and shows it. A new session gets
+    /// a worktree only if `worktree` too. It is the spare Claude when that is in `repo`, fits
+    /// `worktree`, and `repo` hasn't moved on to another commit since.
+    pub fn open(
+        &mut self,
+        repo: &Path,
+        past: Option<&PastSession>,
+        worktree: bool,
+    ) -> color_eyre::Result<()> {
         let repo = repo
             .canonicalize()
             .wrap_err_with(|| format!("{} is not a directory", repo.display()))?;
-        let spare = match self
-            .spare
-            .take_if(|spare| past.is_none() && spare.repo == repo)
-        {
+        let spare = match self.spare.take_if(|spare| {
+            past.is_none() && spare.repo == repo && (worktree || spare.worktree.is_none())
+        }) {
             // Its worktree started from a commit `repo` has moved on from since.
             Some(spare)
                 if spare
@@ -333,7 +350,7 @@ impl App {
                 tracing::info!(key = spare.key, "the spare claude is the new session");
                 spare
             }
-            None => self.spawn_view(repo.clone(), past)?,
+            None => self.spawn_view(repo.clone(), past, worktree)?,
         };
         let ready = view.session.state() != State::Starting;
         self.views.push(view);
@@ -350,7 +367,7 @@ impl App {
         if self.spare.as_ref().is_some_and(|spare| spare.repo == repo) {
             return;
         }
-        match self.spawn_view(repo.to_owned(), None) {
+        match self.spawn_view(repo.to_owned(), None, true) {
             Ok(spare) => {
                 if let Some(old) = self.spare.replace(spare) {
                     self.discard(old);
@@ -362,11 +379,13 @@ impl App {
     }
 
     /// Starts Claude in `repo`, resuming `past`, as a session not on screen yet. A new session
-    /// gets a worktree of its own, if the config wants one and `repo` has a commit to start from.
+    /// gets a worktree of its own, if `worktree`, the config wants one and `repo` has a commit to
+    /// start from.
     fn spawn_view(
         &mut self,
         repo: PathBuf,
         past: Option<&PastSession>,
+        worktree: bool,
     ) -> color_eyre::Result<View> {
         let mut session = Session::default();
         // Known before Claude reports it, so the finder doesn't offer it again.
@@ -377,7 +396,7 @@ impl App {
             // removes.
             session.ai_title = history::ai_title(&past.path);
         }
-        let worktree = if self.config.worktree && past.is_none() {
+        let worktree = if worktree && self.config.worktree && past.is_none() {
             git::head(&repo).map(|base| Worktree {
                 name: format!("ccs-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
                 base,
@@ -482,13 +501,14 @@ impl App {
             .cwd
             .clone()
             .ok_or_eyre("the session has no directory")?;
-        self.open(resume_from(&cwd), Some(&past))
+        self.open(resume_from(&cwd), Some(&past), true)
     }
 
-    /// Starts a new session where the one on screen started.
-    fn open_new(&mut self) {
+    /// Starts a new session where the one on screen started, in a worktree of its own only if
+    /// `worktree`.
+    fn open_new(&mut self, worktree: bool) {
         let repo = self.views[self.active].repo.clone();
-        if let Err(err) = self.open(&repo, None) {
+        if let Err(err) = self.open(&repo, None, worktree) {
             self.notify(format!("starting a session failed: {err:#}"));
         }
     }
@@ -572,7 +592,7 @@ impl App {
                 self.active = index;
                 self.views[index].tab = 0;
             }
-            None => self.open_new(),
+            None => self.open_new(true),
         }
     }
 
@@ -830,10 +850,19 @@ impl App {
             return;
         }
         // Only right after your own key there: never switch away from a session in the background.
-        let typed = view.last_key.is_some_and(|at| at.elapsed() < TYPED_WITHIN);
-        if moves_on && typed && index == self.active && view.tab == 0 && self.modal.is_none() {
+        let typed = view.last_key.filter(|(at, _)| at.elapsed() < TYPED_WITHIN);
+        if moves_on
+            && let Some((_, then)) = typed
+            && index == self.active
+            && view.tab == 0
+            && self.modal.is_none()
+        {
             view.last_key = None;
-            self.advance();
+            match then {
+                Then::Advance => self.advance(),
+                Then::Stay => {}
+                Then::OpenPlain => self.open_new(false),
+            }
         }
     }
 
@@ -899,7 +928,7 @@ impl App {
                 if area.contains(at) && pty.mouse(mouse.kind, mouse.modifiers, at_screen) {
                     // A click can answer Claude's permission dialog.
                     if chat && matches!(mouse.kind, MouseEventKind::Down(_)) {
-                        view.last_key = Some(Instant::now());
+                        view.last_key = Some((Instant::now(), Then::Advance));
                     }
                     return;
                 }
@@ -964,7 +993,17 @@ impl App {
         }
         if let Some(pty) = &mut view.claude.pty {
             pty.key(key);
-            view.last_key = Some(Instant::now());
+            view.last_key = Some((Instant::now(), Then::Advance));
+        }
+    }
+
+    /// Presses Enter in the Claude on screen, so that the prompt it submits, or the tool it
+    /// allows, does `then` next.
+    fn submit(&mut self, then: Then) {
+        let view = &mut self.views[self.active];
+        if let Some(pty) = &mut view.claude.pty {
+            pty.key(KeyEvent::from(KeyCode::Enter));
+            view.last_key = Some((Instant::now(), then));
         }
     }
 
@@ -1000,12 +1039,15 @@ impl App {
         }
         let (tab, tabs) = (view.tab, view.tabs.len() + 1);
         match key.code {
-            // Runs the tab's command again, stopping it first if it is still running.
-            KeyCode::Enter => {
-                if let Some(index) = peer {
-                    self.start_tab(self.active, index);
-                }
-            }
+            // Runs the tab's command again, stopping it first if it is still running. In Chat,
+            // submits and opens a session without a worktree.
+            KeyCode::Enter => match peer {
+                Some(index) => self.start_tab(self.active, index),
+                None => self.submit(Then::OpenPlain),
+            },
+            KeyCode::Char('w') if peer.is_none() => self.submit(Then::Stay),
+            KeyCode::Char('n') => self.open_new(true),
+            KeyCode::Char('N') => self.open_new(false),
             KeyCode::Char(c @ '1'..='9') => {
                 let index = c as usize - '1' as usize;
                 if index < count {
@@ -1052,7 +1094,7 @@ impl App {
                     let past = finder.old[index].past.clone();
                     let cwd = past.cwd.clone().unwrap_or_else(|| finder.cwd.clone());
                     self.modal = None;
-                    if let Err(err) = self.open(resume_from(&cwd), Some(&past)) {
+                    if let Err(err) = self.open(resume_from(&cwd), Some(&past), true) {
                         self.notify(format!("resuming {} failed: {err:#}", past.id));
                     }
                 }
@@ -1209,10 +1251,58 @@ mod tests {
         let mut spare = view(7, cwd.clone());
         spare.cwd = cwd.join(".claude/worktrees/ccs-7");
         app.spare = Some(spare);
-        app.open(&cwd, None).unwrap();
+        app.open(&cwd, None, true).unwrap();
         assert_eq!(app.views.iter().map(|v| v.key).collect::<Vec<_>>(), [7]);
         assert_eq!(app.active, 0);
         assert!(app.spare.is_none());
+    }
+
+    #[test]
+    fn leader_keys_choose_what_a_submitted_prompt_does() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let mut app = app();
+        for key in 0..3 {
+            let mut view = view(key, cwd.clone());
+            // In place of Claude, to take the Enter ccs presses.
+            let pty = Pty::spawn("cat", &cwd, &[], (80, 24), key, app.ptys.clone()).unwrap();
+            view.claude.pty = Some(pty);
+            // Waiting for a prompt; through the view, so no spare starts.
+            view.session.bridge(Bridge::Ready {
+                session_id: format!("s{key}"),
+                root: cwd.clone(),
+            });
+            app.views.push(view);
+        }
+        let leader_key = |app: &mut App, code| app.on_leader_key(KeyEvent::from(code));
+        // Leader w stays, though others wait.
+        leader_key(&mut app, KeyCode::Char('w'));
+        app.on_bridge(0, Bridge::Submitted);
+        assert_eq!(app.active, 0);
+        // Enter goes to the next one waiting.
+        app.key_to_terminal(KeyEvent::from(KeyCode::Enter));
+        app.on_bridge(0, Bridge::Submitted);
+        assert_eq!(app.active, 1);
+        // Leader Enter opens a session without a worktree, though one waits: the spare, as it
+        // has none.
+        app.spare = Some(view(7, cwd.clone()));
+        leader_key(&mut app, KeyCode::Enter);
+        app.on_bridge(1, Bridge::Submitted);
+        assert_eq!(
+            app.views.iter().map(|v| v.key).collect::<Vec<_>>(),
+            [0, 1, 2, 7]
+        );
+        assert_eq!(app.active, 3);
+        // Leader n and N open one without submitting anything.
+        app.spare = Some(view(8, cwd.clone()));
+        leader_key(&mut app, KeyCode::Char('n'));
+        app.spare = Some(view(9, cwd));
+        leader_key(&mut app, KeyCode::Char('N'));
+        assert_eq!(
+            app.views.iter().map(|v| v.key).collect::<Vec<_>>(),
+            [0, 1, 2, 7, 8, 9]
+        );
+        assert_eq!(app.active, 5);
+        assert!(app.notice.is_none());
     }
 
     #[test]

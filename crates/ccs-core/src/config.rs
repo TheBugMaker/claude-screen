@@ -9,7 +9,7 @@ use crate::Error;
 
 /// Keys after the leader that `App::on_leader_key` takes for itself, besides the digits: they
 /// can't be a tab's key.
-const LEADER_KEYS: &[char] = &['[', ']', ',', '.', 'c', 'f', 'q'];
+const LEADER_KEYS: &[char] = &['[', ']', ',', '.', 'c', 'f', 'n', 'N', 'q', 'w'];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -176,6 +176,7 @@ mod tests {
             "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"3\"",
             "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"f\"",
             "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"c\"",
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"n\"",
             "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"d\"\n\
              [[tab]]\nname = \"b\"\ncommand = \"y\"\nkey = \"d\"",
         ] {

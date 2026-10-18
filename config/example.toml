@@ -23,8 +23,10 @@
 # command has exited to do the same.
 
 # Press the leader, then c / a tab's key / [ ] to switch tabs, 1-9 / , . to switch
-# sessions, f to find one, q to quit. Press it twice to send it to the program in the
-# tab, Claude included. A tab's key can't be one of these.
+# sessions, n / N to open one (N: without a worktree), f to find one, q to quit. In the
+# Chat tab, Enter submits and opens a session without a worktree, w submits and stays.
+# Press it twice to send it to the program in the tab, Claude included. A tab's key can't
+# be one of these.
 leader = "ctrl-space"
 
 # Colors Claude, ccs and every tab. Built in: gruvbox-dark, gruvbox-light, tokyonight-night,

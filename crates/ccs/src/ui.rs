@@ -462,9 +462,19 @@ fn leader_actions(leader: &str, tabs: &[(char, &str)], peer: bool) -> Vec<(Strin
         ("1-9", "go to session"),
         (",", "previous session"),
         (".", "next session"),
+        ("n", "new session"),
+        ("N", "new session, no worktree"),
         ("f", "find a session"),
     ];
     let switch = [("[", "previous tab"), ("]", "next tab")];
+    let enter: &[_] = if peer {
+        &[("Enter", "reload tab")]
+    } else {
+        &[
+            ("Enter", "submit, new session, no worktree"),
+            ("w", "submit, stay"),
+        ]
+    };
     sessions
         .into_iter()
         .map(owned)
@@ -474,7 +484,7 @@ fn leader_actions(leader: &str, tabs: &[(char, &str)], peer: bool) -> Vec<(Strin
                 .map(|&(key, name)| (key.to_string(), name.to_owned())),
         )
         .chain(switch.into_iter().map(owned))
-        .chain(peer.then(|| owned(("Enter", "reload tab"))))
+        .chain(enter.iter().copied().map(owned))
         .chain([owned(("q", "quit"))])
         .chain([owned((leader, "send to program"))])
         .collect()
@@ -766,16 +776,24 @@ mod tests {
     #[test]
     fn leader_panel_lists_the_keys_after_the_leader() {
         let actions = leader_actions("ctrl-space", &[('r', "review"), ('s', "shell")], true);
-        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(44, 16)).unwrap();
         terminal
             .draw(|frame| render_leader_panel(frame, frame.area(), "ctrl-space", &actions))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
 
-        // Reloading is for peer tabs. Claude gets the leader too.
+        // Reloading is for peer tabs; in Chat, Enter and w submit. Claude gets the leader too.
+        let action = |actions: &[(String, String)], key: &str| {
+            actions
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, action)| action.clone())
+        };
         let chat = leader_actions("ctrl-space", &[], false);
-        assert!(!chat.iter().any(|(key, _)| key == "Enter"));
-        assert!(chat.iter().any(|(key, _)| key == "ctrl-space"));
+        assert!(action(&chat, "Enter").is_some_and(|a| a.starts_with("submit")));
+        assert!(action(&chat, "w").is_some());
+        assert!(action(&actions, "w").is_none());
+        assert!(action(&chat, "ctrl-space").is_some());
     }
 
     #[test]

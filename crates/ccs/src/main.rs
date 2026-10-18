@@ -80,7 +80,7 @@ async fn main() -> color_eyre::Result<()> {
     );
     match &cli.resume {
         Some(id) => app.resume(id)?,
-        None => app.open(&cli.dir, None)?,
+        None => app.open(&cli.dir, None, true)?,
     }
 
     let mut terminal = ratatui::init();
