@@ -4,6 +4,7 @@
 //! modes) and config/state paths. Has no I/O beyond reading config files.
 
 pub mod config;
+pub mod keys;
 pub mod paths;
 
 /// Errors produced by the core crate.

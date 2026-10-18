@@ -1,15 +1,15 @@
-//! `~/.config/ccs/config.toml`: the leader key, the theme, the slide between sessions, worktrees,
-//! plan mode, the `[[tab]]` definitions and the `[[merge]]` actions.
+//! `~/.config/ccs/config.toml`: the leader key and the `[keys]` of each action, the theme, the
+//! slide between sessions, worktrees, plan mode, the `[[tab]]` definitions and the `[[merge]]`
+//! actions.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use serde::Deserialize;
 
-use crate::Error;
-
-/// Keys after the leader that `App::on_leader_key` takes for itself, besides the digits: they
-/// can't be a tab's key.
-const LEADER_KEYS: &[char] = &['[', ']', ',', '.', 'c', 'f', 'm', 'n', 'N', 'q', 'w'];
+use crate::{
+    Error,
+    keys::{Action, Binding, Bindings, Key, KeyCode},
+};
 
 /// What the default `[[merge]]` commits with.
 pub const MERGE_COMMIT: &str = r#"git add -A && git commit -m "$CS_MESSAGE""#;
@@ -32,8 +32,10 @@ can't be resolved safely, stop and explain it, and leave the merge unfinished.";
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
-    /// Key that starts a ccs shortcut, e.g. `ctrl-space`. Parsed by the app.
-    pub leader: String,
+    /// Key that starts a ccs shortcut, e.g. `<C-Space>`.
+    pub leader: Key,
+    /// The keys of every action: the config's, else the defaults.
+    pub keys: BTreeMap<Action, Bindings>,
     /// Name of the theme: a file in `~/.config/ccs/themes`, or a built-in one. Read by the app.
     pub theme: Option<String>,
     /// How long switching sessions slides the new one in over 100 columns, in milliseconds: a
@@ -81,8 +83,9 @@ fn merge_commit() -> String {
 #[serde(deny_unknown_fields)]
 pub struct TabDef {
     pub name: String,
-    /// Goes to the tab after the leader.
-    pub key: Option<char>,
+    /// Go to the tab.
+    #[serde(default)]
+    pub key: Bindings,
     #[serde(default)]
     pub mode: Mode,
     /// Run with `sh -c` in the session's directory, with the `CS_*` variables set.
@@ -104,7 +107,15 @@ pub enum Mode {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            leader: "ctrl-space".into(),
+            leader: Key {
+                code: KeyCode::Char(' '),
+                ctrl: true,
+                alt: false,
+            },
+            keys: Action::ALL
+                .into_iter()
+                .map(|action| (action, action.default_bindings()))
+                .collect(),
             theme: None,
             slide_ms: 150,
             worktree: true,
@@ -112,13 +123,13 @@ impl Default for Config {
             tabs: vec![
                 TabDef {
                     name: "review".into(),
-                    key: Some('r'),
+                    key: Bindings::after_leader(Key::char('r')),
                     mode: Mode::Eager,
                     command: "git diff".into(),
                 },
                 TabDef {
                     name: "shell".into(),
-                    key: Some('s'),
+                    key: Bindings::after_leader(Key::char('s')),
                     mode: Mode::Regular,
                     command: "$SHELL".into(),
                 },
@@ -144,25 +155,69 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self, Error> {
-        let config: Self = toml::from_str(text)?;
+        let mut config: Self = toml::from_str(text)?;
+        // `[keys]` lists only the actions it changes.
+        for action in Action::ALL {
+            config
+                .keys
+                .entry(action)
+                .or_insert_with(|| action.default_bindings());
+        }
         config.validate()?;
         Ok(config)
     }
 
     fn validate(&self) -> Result<(), Error> {
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let Some(key) = tab.key else { continue };
-            if key.is_ascii_digit() || LEADER_KEYS.contains(&key) {
-                return Err(Error::Invalid(format!(
-                    "tab {:?}: key {key:?} is taken by a ccs shortcut",
-                    tab.name
-                )));
-            }
-            if self.tabs[..i].iter().any(|other| other.key == Some(key)) {
-                return Err(Error::Invalid(format!(
-                    "tab {:?}: key {key:?} is used by another tab",
-                    tab.name
-                )));
+        if !self.leader.ctrl && !self.leader.alt {
+            return Err(Error::Invalid(format!(
+                "leader: {:?} needs ctrl or alt, like <C-Space>: it would take that key from what \
+                 you type",
+                self.leader.to_string()
+            )));
+        }
+        // What each key does, and the action it is, if it isn't a tab.
+        let owners: Vec<(String, &Bindings, Option<Action>)> = self
+            .keys
+            .iter()
+            .map(|(&action, keys)| (format!("keys.{}", action.name()), keys, Some(action)))
+            .chain(
+                self.tabs
+                    .iter()
+                    .map(|tab| (format!("tab {:?}", tab.name), &tab.key, None)),
+            )
+            .collect();
+        for (i, (owner, keys, action)) in owners.iter().enumerate() {
+            for &binding in &keys.0 {
+                let Binding { leader, key } = binding;
+                if !leader && !key.ctrl && !key.alt {
+                    let after = Binding { leader: true, key };
+                    let alt = Key { alt: true, ..key };
+                    return Err(Error::Invalid(format!(
+                        "{owner}: {:?} needs <leader> ({after}), or ctrl or alt ({alt}): on its \
+                         own it would take that key from what you type",
+                        binding.to_string()
+                    )));
+                }
+                if key == self.leader {
+                    return Err(Error::Invalid(format!(
+                        "{owner}: {:?} is the leader's: twice sends it to the program in the tab",
+                        binding.to_string()
+                    )));
+                }
+                // Two can share a key only if they never work in the same tab.
+                let works = |action: &Option<Action>, peer| action.is_none_or(|a| a.works_in(peer));
+                let shared = owners[..i].iter().find(|(_, other_keys, other)| {
+                    other_keys.0.contains(&binding)
+                        && [false, true]
+                            .into_iter()
+                            .any(|peer| works(action, peer) && works(other, peer))
+                });
+                if let Some((other, _, _)) = shared {
+                    return Err(Error::Invalid(format!(
+                        "{other} and {owner} both have {:?}",
+                        binding.to_string()
+                    )));
+                }
             }
         }
         // It would do nothing and succeed, which closes the session.
@@ -188,16 +243,18 @@ mod tests {
         assert_eq!(config.slide_ms, 150);
         assert!(config.worktree);
         assert!(config.plan);
-        // It shows the default action as it is.
+        // It shows the default action and keys as they are.
         assert_eq!(config.merges, Config::default().merges);
+        assert_eq!(config.keys, Config::default().keys);
     }
 
     #[test]
     fn missing_file_and_missing_tabs_give_the_defaults() {
         let config = Config::load(Path::new("/nonexistent/ccs/config.toml")).unwrap();
         assert_eq!(config, Config::default());
-        let config = Config::parse("leader = \"ctrl-a\"").unwrap();
-        assert_eq!(config.leader, "ctrl-a");
+        let config = Config::parse("leader = \"<C-a>\"").unwrap();
+        assert_eq!(config.leader, Key::parse("<C-a>").unwrap());
+        assert_eq!(config.keys, Config::default().keys);
         assert_eq!(config.slide_ms, 150);
         assert_eq!(config.tabs, Config::default().tabs);
         // 0 turns the slide off.
@@ -241,12 +298,12 @@ mod tests {
     #[test]
     fn tabs_replace_the_defaults() {
         let config = Config::parse("[[tab]]\nname = \"top\"\ncommand = \"htop\"").unwrap();
-        assert_eq!(config.leader, "ctrl-space");
+        assert_eq!(config.leader, Config::default().leader);
         assert_eq!(
             config.tabs,
             vec![TabDef {
                 name: "top".into(),
-                key: None,
+                key: Bindings::default(),
                 mode: Mode::Lazy,
                 command: "htop".into(),
             }]
@@ -266,22 +323,69 @@ mod tests {
     }
 
     #[test]
+    fn keys_take_lists_and_keep_the_defaults_of_the_others() {
+        let config = Config::parse(
+            "[keys]\nfind = [\"<leader>f\", \"<C-f>\"]\nsession_1 = \"<A-1>\"\nquit = []\n\
+             [[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = [\"<leader>r\", \"<A-r>\"]",
+        )
+        .unwrap();
+        let keys =
+            |texts: &[&str]| Bindings(texts.iter().map(|t| Binding::parse(t).unwrap()).collect());
+        assert_eq!(config.keys[&Action::Find], keys(&["<leader>f", "<C-f>"]));
+        assert_eq!(config.keys[&Action::Session1], keys(&["<A-1>"]));
+        assert_eq!(config.keys[&Action::Quit], keys(&[]));
+        assert_eq!(config.keys[&Action::Merge], keys(&["<leader>m"]));
+        assert_eq!(config.tabs[0].key, keys(&["<leader>r", "<A-r>"]));
+        // Enter does one thing in Chat, another in a terminal tab: so can any key.
+        assert!(
+            Config::parse("[keys]\nsubmit_and_stay = \"<A-x>\"\nrerun_tab = \"<A-x>\"").is_ok()
+        );
+        // The leader can go after the leader with another key.
+        assert!(Config::parse("[keys]\nquit = \"<leader><C-q>\"").is_ok());
+    }
+
+    #[test]
+    fn a_bad_key_says_where_it_is() {
+        let text = "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"ctrl-r\"";
+        let Err(Error::Parse(err)) = Config::parse(text) else {
+            panic!("accepted: {text}");
+        };
+        let err = err.to_string();
+        assert!(err.contains("line 4") && err.contains("<C-f>"), "{err}");
+    }
+
+    #[test]
     fn rejects_bad_configs() {
+        let tab = |key: &str| format!("[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = {key}");
         for text in [
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkind = \"claude\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nmode = \"on_change\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"3\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"f\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"c\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"n\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"m\"",
-            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"d\"\n\
-             [[tab]]\nname = \"b\"\ncommand = \"y\"\nkey = \"d\"",
-            "[[merge]]\nname = \"a\"\ncommand = \" \"",
-            "[[merge]]\nname = \"a\"",
-            "[[merge]]\nname = \"a\"\ncommand = \"x\"\nthen = \"keep\"",
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkind = \"claude\"".to_owned(),
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nmode = \"on_change\"".to_owned(),
+            // A key of its own, or taken.
+            tab("\"r\""),
+            tab("\"<leader>3\""),
+            tab("\"<leader>f\""),
+            tab("\"<leader>c\""),
+            tab("\"<leader>N\""),
+            tab("\"<leader><CR>\""),
+            tab("[\"<A-r>\", \"<leader>m\"]"),
+            tab("\"<leader><C-Space>\""),
+            tab("\"<C-Space>\""),
+            tab("3"),
+            format!("{}\n{}", tab("\"<leader>d\""), tab("\"<leader>d\"")),
+            "[keys]\nfind = \"f\"".to_owned(),
+            "[keys]\nfind = \"<leader>q\"".to_owned(),
+            "[keys]\nfind = \"<A-x>\"\nmerge = \"<A-x>\"".to_owned(),
+            "[keys]\nsubmit_and_stay = \"<leader>x\"\nsubmit_and_new_session = \"<leader>x\""
+                .to_owned(),
+            "[keys]\nopen = \"<leader>o\"".to_owned(),
+            // The old way, and a leader without ctrl or alt.
+            "leader = \"ctrl-space\"".to_owned(),
+            "leader = \"a\"".to_owned(),
+            "[[merge]]\nname = \"a\"\ncommand = \" \"".to_owned(),
+            "[[merge]]\nname = \"a\"".to_owned(),
+            "[[merge]]\nname = \"a\"\ncommand = \"x\"\nthen = \"keep\"".to_owned(),
         ] {
-            assert!(Config::parse(text).is_err(), "accepted: {text}");
+            assert!(Config::parse(&text).is_err(), "accepted: {text}");
         }
     }
 }

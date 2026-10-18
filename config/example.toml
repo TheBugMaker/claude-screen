@@ -23,13 +23,20 @@
 # Press the leader, then Enter, to run the tab's command again. Press Enter in a tab whose
 # command has exited to do the same.
 
-# Press the leader, then c / a tab's key / [ ] to switch tabs, 1-9 / , . to switch
-# sessions, n / N to open one (N: without a worktree), f to find one, m to commit and merge
-# its work (see [[merge]] below), q to quit. In the Chat tab, Enter submits and opens a
-# session without a worktree, w submits and stays.
-# Press it twice to send it to the program in the tab, Claude included. A tab's key can't
-# be one of these.
-leader = "ctrl-space"
+# Keys are written as vim writes them:
+#
+#   <leader>f           f after the leader
+#   <C-f> <A-f>         Ctrl-F, Alt-F, on their own (<M-f> is Alt-F too). Without the leader,
+#                       a key needs Ctrl or Alt: the others are what you type
+#   N                   Shift is in the character's case: <leader>N, <A-N>
+#   <Space> <CR> <lt>   Space, Enter, and < itself: <C-Space>, <leader><CR>
+#
+# A key without the leader goes to ccs, not to Claude or the program in the tab, wherever it
+# does something.
+
+# Starts a key after the leader. Press it twice to send it to the program in the tab, Claude
+# included.
+leader = "<C-Space>"
 
 # Colors Claude, ccs and every tab. Built in: gruvbox-dark, gruvbox-light, tokyonight-night,
 # tokyonight-day. A file ~/.config/ccs/themes/<name>.json adds one, or replaces a built-in one
@@ -52,21 +59,51 @@ worktree = true
 # Resumed sessions, and one opened to fix a merge's conflicts, start in your own default mode.
 plan = true
 
+# What each key does: one key, or a list of them. List only the actions you change; the others
+# keep the keys below, and [] leaves one without a key. No two can have the same key, but for
+# rerun_tab and the submit_* ones: they never work in the same tab.
+[keys]
+session_1 = "<leader>1"                 # go to session 1, and so on to session_9
+session_2 = "<leader>2"
+session_3 = "<leader>3"
+session_4 = "<leader>4"
+session_5 = "<leader>5"
+session_6 = "<leader>6"
+session_7 = "<leader>7"
+session_8 = "<leader>8"
+session_9 = "<leader>9"
+previous_session = "<leader>,"
+next_session = "<leader>."
+new_session = "<leader>n"               # in a worktree of its own, with worktree = true
+new_session_no_worktree = "<leader>N"
+find = "<leader>f"                      # find a session, open or past
+merge = "<leader>m"                     # commit and merge the session's work: see [[merge]]
+chat = "<leader>c"                      # go to the Chat tab
+previous_tab = "<leader>["
+next_tab = "<leader>]"
+rerun_tab = "<leader><CR>"              # in a terminal tab: run its command again
+submit_and_new_session = "<leader><CR>" # in Chat: submit, then open a session without a worktree
+submit_and_stay = "<leader>w"           # in Chat: submit and stay
+quit = "<leader>q"
+# For example, Alt and a digit go to a session as well as the leader and the digit:
+# session_1 = ["<leader>1", "<A-1>"]
+
+# A tab's key goes to it: one key or a list, as in [keys].
 [[tab]]
 name = "review"
-key = "r"
+key = "<leader>r"
 mode = "eager"
 command = "git diff"
 
 [[tab]]
 name = "shell"
-key = "s"
+key = "<leader>s"
 mode = "regular"
 command = "$SHELL"
 
 [[tab]]
 name = "git"
-key = "g"
+key = ["<leader>g", "<A-g>"]
 command = "lazygit"
 
 # Leader m gets the session's work into its target. A panel shows what will happen and asks
@@ -127,20 +164,20 @@ safely, stop and explain it, and leave the merge unfinished."""
 #
 # [[tab]]
 # name = "diff"
-# key = "d"
+# key = "<leader>d"
 # mode = "on_change"
 # command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
 #
 # [[tab]]
 # name = "file"
-# key = "e"
+# key = "<leader>e"
 # mode = "on_demand"
 # params = [{ name = "file", picker = "changed_files" }]
 # command = "git --no-pager diff --color=always $CS_GIT_BASE -- \"$CS_FILE\" | less -R"
 #
 # [[tab]]
 # name = "tests"
-# key = "t"
+# key = "<leader>t"
 # mode = "on_demand"
 # params = [{ name = "filter", prompt = "test filter", default = "" }]
 # command = "cargo test $CS_FILTER"

@@ -1,6 +1,10 @@
 use std::{path::Path, time::SystemTime};
 
 use ccs_claude::session::State;
+use ccs_core::{
+    config::Config,
+    keys::{Action, Bindings},
+};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -79,7 +83,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         );
     }
     let notice = app.notice.as_deref().map(|text| (text, app.notice_ok));
-    let left = rule_status(notice, tab, view.tab > 0, view.on_merge_tab());
+    let merge = view
+        .on_merge_tab()
+        .then(|| key_hint(&app.config, Action::Merge));
+    let left = rule_status(notice, tab, view.tab > 0, merge.as_deref());
     render_rule(frame, status, left, leader_hint(app));
     render_leader(frame, app, status);
     render_modal(frame, app);
@@ -462,11 +469,20 @@ fn render_session_bar(
 
 /// Chat, then the peer tabs, each with whether it has finished. Chat's state shows in the session
 /// bar, so only its end shows here.
-fn tab_labels(view: &View) -> Vec<(Option<char>, &str, bool)> {
+fn tab_labels(view: &View) -> Vec<(Option<String>, &str, bool)> {
     std::iter::once(&view.claude)
         .chain(&view.tabs)
-        .map(|tab| (tab.def.key, tab.def.name.as_str(), tab.finished()))
+        .map(|tab| (tab_key(&tab.def.key), tab.def.name.as_str(), tab.finished()))
         .collect()
+}
+
+/// The key shown with a tab: its first after the leader, else its first.
+fn tab_key(keys: &Bindings) -> Option<String> {
+    keys.0
+        .iter()
+        .find(|b| b.leader)
+        .or(keys.0.first())
+        .map(|b| b.key.label())
 }
 
 /// The tab rule: the tabs over a rule, and the session's directory in the room left on the right.
@@ -474,7 +490,7 @@ fn tab_labels(view: &View) -> Vec<(Option<char>, &str, bool)> {
 fn render_tab_bar(
     frame: &mut Frame,
     area: Rect,
-    labels: &[(Option<char>, &str, bool)],
+    labels: &[(Option<String>, &str, bool)],
     selected: usize,
     cwd: &str,
 ) -> Vec<Rect> {
@@ -507,11 +523,13 @@ fn render_tab_bar(
 
 /// `c Chat`, `r review`, `s shell ✗`: the key that picks each tab after the leader, its name,
 /// and whether it has finished.
-fn tab_titles(labels: &[(Option<char>, &str, bool)]) -> Vec<Line<'static>> {
+fn tab_titles(labels: &[(Option<String>, &str, bool)]) -> Vec<Line<'static>> {
     labels
         .iter()
-        .map(|&(key, name, finished)| {
+        .map(|(key, name, finished)| {
+            let (name, finished) = (*name, *finished);
             let mut spans: Vec<Span> = key
+                .as_ref()
                 .map(|key| Span::raw(format!("{key} ")).fg(theme::get().dim))
                 .into_iter()
                 .collect();
@@ -595,7 +613,7 @@ fn render_rule(frame: &mut Frame, area: Rect, left: Line, right: Line) -> Rect {
 
 /// How to see what the keys after the leader do; brighter while the leader waits for one.
 fn leader_hint(app: &App) -> Line<'static> {
-    let hint = Line::from(format!("{} actions", app.config.leader));
+    let hint = Line::from(format!("{} actions", app.config.leader.label()));
     if app.leader_pending.is_some() {
         hint.fg(theme::get().leader_pending)
     } else {
@@ -603,41 +621,81 @@ fn leader_hint(app: &App) -> Line<'static> {
     }
 }
 
-/// The keys after the leader and what they do, as `App::on_leader_key` takes them. `tabs` are
-/// the peer tabs' own keys and names; `peer` is whether a peer tab is on screen.
-fn leader_actions(leader: &str, tabs: &[(char, &str)], peer: bool) -> Vec<(String, String)> {
-    let owned = |(key, action): (&str, &str)| (key.to_owned(), action.to_owned());
-    let sessions = [
-        ("1-9", "go to session"),
-        (",", "previous session"),
-        (".", "next session"),
-        ("n", "new session"),
-        ("N", "new session, no worktree"),
-        ("f", "find a session"),
-        ("m", "commit & merge"),
-    ];
-    let switch = [("[", "previous tab"), ("]", "next tab")];
-    let enter: &[_] = if peer {
-        &[("Enter", "reload tab")]
-    } else {
-        &[
-            ("Enter", "submit, new session, no worktree"),
-            ("w", "submit, stay"),
-        ]
+/// The keys after the leader and what they do in the tab on screen, a terminal tab if `peer`, as
+/// `App::command_for` finds them. `tabs` are the peer tabs' keys and names.
+fn leader_actions(
+    config: &Config,
+    tabs: &[(&Bindings, &str)],
+    peer: bool,
+) -> Vec<(String, String)> {
+    // The keys after the leader in `keys`, in one column.
+    let after = |keys: &Bindings| {
+        let labels: Vec<String> = keys
+            .0
+            .iter()
+            .filter(|b| b.leader)
+            .map(|b| b.key.label())
+            .collect();
+        labels.join(" ")
     };
-    sessions
-        .into_iter()
-        .map(owned)
-        .chain([owned(("c", "Chat"))])
-        .chain(
-            tabs.iter()
-                .map(|&(key, name)| (key.to_string(), name.to_owned())),
-        )
-        .chain(switch.into_iter().map(owned))
-        .chain(enter.iter().copied().map(owned))
-        .chain([owned(("q", "quit"))])
-        .chain([owned((leader, "send to program"))])
-        .collect()
+    // With their own digits after the leader, the nine sessions take one row.
+    let sessions = Action::ALL[..9]
+        .iter()
+        .all(|&a| after(&config.keys[&a]) == after(&a.default_bindings()));
+    let mut rows = Vec::new();
+    for action in Action::ALL.into_iter().filter(|a| a.works_in(peer)) {
+        let keys = after(&config.keys[&action]);
+        match action.session() {
+            Some(0) if sessions => rows.push(("1-9".to_owned(), "go to session".to_owned())),
+            Some(_) if sessions => {}
+            _ if keys.is_empty() => {}
+            _ => rows.push((keys, action_text(action))),
+        }
+        if action == Action::Chat {
+            rows.extend(
+                tabs.iter()
+                    .map(|&(keys, name)| (after(keys), name.to_owned()))
+                    .filter(|(keys, _)| !keys.is_empty()),
+            );
+        }
+    }
+    rows.push((config.leader.label(), "send to program".to_owned()));
+    rows
+}
+
+/// What `action` does, in the leader panel.
+fn action_text(action: Action) -> String {
+    let text = match action {
+        Action::PreviousSession => "previous session",
+        Action::NextSession => "next session",
+        Action::NewSession => "new session",
+        Action::NewSessionNoWorktree => "new session, no worktree",
+        Action::Find => "find a session",
+        Action::Merge => "commit & merge",
+        Action::Chat => "Chat",
+        Action::PreviousTab => "previous tab",
+        Action::NextTab => "next tab",
+        Action::RerunTab => "reload tab",
+        Action::SubmitAndNewSession => "submit, new session, no worktree",
+        Action::SubmitAndStay => "submit, stay",
+        Action::Quit => "quit",
+        // Numbered below.
+        _ => "go to session",
+    };
+    match action.session() {
+        Some(index) => format!("{text} {}", index + 1),
+        None => text.to_owned(),
+    }
+}
+
+/// How to do `action`, for notices: `leader m`, or a key of its own like `A-m`. Its name in the
+/// config if it has no key.
+pub fn key_hint(config: &Config, action: Action) -> String {
+    match config.keys[&action].0.first() {
+        Some(b) if b.leader => format!("leader {}", b.key.label()),
+        Some(b) => b.key.label(),
+        None => action.name().to_owned(),
+    }
 }
 
 /// The keys after the leader, which-key style, above the status line `status`, once the leader
@@ -647,18 +705,18 @@ fn render_leader(frame: &mut Frame, app: &App, status: Rect) {
         return;
     }
     let view = &app.views[app.active];
-    let tabs: Vec<(char, &str)> = view
+    let tabs: Vec<(&Bindings, &str)> = view
         .tabs
         .iter()
-        .filter_map(|t| Some((t.def.key?, t.def.name.as_str())))
+        .map(|t| (&t.def.key, t.def.name.as_str()))
         .collect();
-    let actions = leader_actions(&app.config.leader, &tabs, view.tab > 0);
+    let actions = leader_actions(&app.config, &tabs, view.tab > 0);
     let area = frame.area();
     let above = Rect {
         height: status.y - area.y,
         ..area
     };
-    render_leader_panel(frame, above, &app.config.leader, &actions);
+    render_leader_panel(frame, above, &app.config.leader.label(), &actions);
 }
 
 /// `actions` one per row, key ➜ what it does, in a box in the bottom-right corner of `area`.
@@ -698,8 +756,13 @@ fn render_leader_panel(frame: &mut Frame, area: Rect, leader: &str, actions: &[(
 
 /// What the bottom rule says on the left: `notice` (with whether it is good news), else a peer
 /// tab's command and how it ended. Only a peer tab is run again (`peer`); Claude's session closes
-/// when it ends. The merge tab (`merge`) shows its action's name, and runs again by leader m.
-fn rule_status(notice: Option<(&str, bool)>, tab: &Tab, peer: bool, merge: bool) -> Line<'static> {
+/// when it ends. The merge tab shows its action's name, and runs again by the key `merge`.
+fn rule_status(
+    notice: Option<(&str, bool)>,
+    tab: &Tab,
+    peer: bool,
+    merge: Option<&str>,
+) -> Line<'static> {
     if let Some((notice, ok)) = notice {
         let color = if ok {
             theme::get().idle
@@ -708,10 +771,9 @@ fn rule_status(notice: Option<(&str, bool)>, tab: &Tab, peer: bool, merge: bool)
         };
         return Line::from(notice.to_owned()).fg(color);
     }
-    let again = if merge {
-        "leader m to try again"
-    } else {
-        "Enter re-runs"
+    let again = match merge {
+        Some(key) => format!("{key} to try again"),
+        None => "Enter re-runs".to_owned(),
     };
     let ended = match (&tab.error, &tab.exited) {
         (Some(_), _) if peer => Span::raw("failed to start · Enter retries").fg(theme::get().error),
@@ -722,7 +784,7 @@ fn rule_status(notice: Option<(&str, bool)>, tab: &Tab, peer: bool, merge: bool)
         _ => Span::default(),
     };
     let mut spans = Vec::new();
-    if merge {
+    if merge.is_some() {
         spans.push(Span::raw(format!("merge: {}", tab.def.name)).fg(theme::get().dim));
         if tab.finished() {
             spans.push(Span::raw(" · ").fg(theme::get().dim));
@@ -764,7 +826,10 @@ fn age(now: SystemTime, then: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ccs_core::config::{Mode, TabDef};
+    use ccs_core::{
+        config::{Mode, TabDef},
+        keys::Key,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
@@ -861,9 +926,9 @@ mod tests {
     #[test]
     fn tab_bar_shows_keys_and_states() {
         let labels = [
-            (Some('c'), "Chat", false),
-            (Some('r'), "review", true),
-            (Some('s'), "shell", false),
+            (Some("c".to_owned()), "Chat", false),
+            (Some("r".to_owned()), "review", true),
+            (Some("s".to_owned()), "shell", false),
             (None, "git", false),
         ];
         let mut titles = Vec::new();
@@ -903,7 +968,7 @@ mod tests {
         Tab {
             def: TabDef {
                 name: name.into(),
-                key: None,
+                key: Bindings::default(),
                 mode: Mode::Lazy,
                 command: command.into(),
             },
@@ -918,13 +983,13 @@ mod tests {
     fn bottom_rule_says_how_a_tab_ended() {
         let mut review = tab("review", "git diff");
         assert_eq!(
-            rule_status(None, &review, true, false).to_string(),
+            rule_status(None, &review, true, None).to_string(),
             "git diff"
         );
         review.exited = Some("exit 1".into());
         let rule = |width| {
             let terminal = draw(width, 1, |frame| {
-                let left = rule_status(None, &review, true, false);
+                let left = rule_status(None, &review, true, None);
                 render_rule(frame, frame.area(), left, Line::from("ctrl-space actions"));
             });
             terminal.backend().to_string()
@@ -935,23 +1000,23 @@ mod tests {
 
         // Claude says nothing while it runs.
         let claude = tab("Chat", "claude");
-        assert_eq!(rule_status(None, &claude, false, false).to_string(), "");
+        assert_eq!(rule_status(None, &claude, false, None).to_string(), "");
         // A notice comes first, in red unless it is good news.
-        let notice = rule_status(Some(("resuming s1 failed", false)), &review, true, false);
+        let notice = rule_status(Some(("resuming s1 failed", false)), &review, true, None);
         assert_eq!(notice.to_string(), "resuming s1 failed");
         assert_eq!(notice.style.fg, Some(theme::get().error));
-        let merged = rule_status(Some(("merged api into main", true)), &review, true, false);
+        let merged = rule_status(Some(("merged api into main", true)), &review, true, None);
         assert_eq!(merged.style.fg, Some(theme::get().idle));
 
         // The merge tab says which action ran, and isn't run again by Enter.
         let mut merge = tab("pull request", "git push && gh pr create --fill");
         assert_eq!(
-            rule_status(None, &merge, true, true).to_string(),
+            rule_status(None, &merge, true, Some("leader m")).to_string(),
             "merge: pull request"
         );
         merge.exited = Some("exit 1".into());
         assert_eq!(
-            rule_status(None, &merge, true, true).to_string(),
+            rule_status(None, &merge, true, Some("leader m")).to_string(),
             "merge: pull request · exited (exit 1) · leader m to try again"
         );
     }
@@ -996,10 +1061,15 @@ mod tests {
 
     #[test]
     fn leader_panel_lists_the_keys_after_the_leader() {
-        let actions = leader_actions("ctrl-space", &[('r', "review"), ('s', "shell")], true);
+        let config = Config::default();
+        let (review, shell) = (
+            Bindings::after_leader(Key::char('r')),
+            Bindings::after_leader(Key::char('s')),
+        );
+        let actions = leader_actions(&config, &[(&review, "review"), (&shell, "shell")], true);
         let mut terminal = Terminal::new(TestBackend::new(44, 16)).unwrap();
         terminal
-            .draw(|frame| render_leader_panel(frame, frame.area(), "ctrl-space", &actions))
+            .draw(|frame| render_leader_panel(frame, frame.area(), "C-Space", &actions))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
 
@@ -1010,11 +1080,34 @@ mod tests {
                 .find(|(k, _)| k == key)
                 .map(|(_, action)| action.clone())
         };
-        let chat = leader_actions("ctrl-space", &[], false);
+        let chat = leader_actions(&config, &[], false);
         assert!(action(&chat, "Enter").is_some_and(|a| a.starts_with("submit")));
         assert!(action(&chat, "w").is_some());
         assert!(action(&actions, "w").is_none());
-        assert!(action(&chat, "ctrl-space").is_some());
+        assert!(action(&chat, "C-Space").is_some());
+
+        // Keys of their own: the sessions one by one, each of the keys after the leader, none
+        // for keys without it.
+        let config = Config::parse(
+            "[keys]\nsession_2 = [\"<leader>2\", \"<A-2>\"]\nsession_3 = \"<A-3>\"\n\
+             find = [\"<leader>f\", \"<leader>/\", \"<C-f>\"]\nquit = \"<C-q>\"",
+        )
+        .unwrap();
+        let chat = leader_actions(&config, &[], false);
+        assert_eq!(action(&chat, "1").as_deref(), Some("go to session 1"));
+        assert_eq!(action(&chat, "2").as_deref(), Some("go to session 2"));
+        assert!(
+            !chat
+                .iter()
+                .any(|(_, a)| a == "go to session 3" || a == "quit")
+        );
+        assert_eq!(action(&chat, "f /").as_deref(), Some("find a session"));
+        assert_eq!(key_hint(&config, Action::Quit), "C-q");
+        assert_eq!(key_hint(&config, Action::Merge), "leader m");
+        // Keys without the leader aren't listed: the digits after it still take one row.
+        let config = Config::parse("[keys]\nsession_2 = [\"<leader>2\", \"<A-2>\"]").unwrap();
+        let chat = leader_actions(&config, &[], false);
+        assert_eq!(action(&chat, "1-9").as_deref(), Some("go to session"));
     }
 
     #[test]

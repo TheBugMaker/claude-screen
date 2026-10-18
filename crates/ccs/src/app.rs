@@ -8,7 +8,10 @@ use ccs_claude::{
     history::{self, PastSession},
     session::{Session, State},
 };
-use ccs_core::config::{Config, Mode, TabDef};
+use ccs_core::{
+    config::{Config, Mode, TabDef},
+    keys::{Action, Bindings},
+};
 use ccs_term::{Pty, PtyEvent};
 use color_eyre::{
     Section, SectionExt,
@@ -28,7 +31,7 @@ use crate::{
     finder::{self, Finder, OldSession, Scanned, Target},
     git,
     input::Input,
-    keys::KeyMatch,
+    keys,
     merge::{self, MergePanel, Outcome, Place, Unmerged},
     theme::ClaudeTheme,
     ui,
@@ -68,7 +71,6 @@ pub struct App {
     scans: mpsc::UnboundedSender<Scanned>,
     ptys: ccs_term::EventSender,
     pub config: Config,
-    leader: KeyMatch,
     /// When the leader was pressed; the next key is a ccs shortcut.
     pub leader_pending: Option<Instant>,
     /// The keys after the leader are listed on screen.
@@ -276,11 +278,19 @@ impl View {
 enum Then {
     /// Goes to the session that needs you most, or a new one: Enter.
     Advance,
-    /// Stays on the session: leader w.
+    /// Stays on the session: `submit_and_stay`, leader w.
     Stay,
     /// Opens a new session where this one started, without a worktree, even if another one
-    /// waits: leader Enter.
+    /// waits: `submit_and_new_session`, leader Enter.
     OpenPlain,
+}
+
+/// What a key of the config does.
+#[derive(Clone, Copy)]
+enum Command {
+    Action(Action),
+    /// Shows a tab: 0 is Chat.
+    Tab(usize),
 }
 
 /// A worktree ccs asked Claude to make: `claude --worktree <name>`.
@@ -353,7 +363,6 @@ struct Slide {
 impl App {
     pub fn new(
         config: Config,
-        leader: KeyMatch,
         scans: mpsc::UnboundedSender<Scanned>,
         ptys: ccs_term::EventSender,
         bridge: PathBuf,
@@ -370,7 +379,6 @@ impl App {
             scans,
             ptys,
             config,
-            leader,
             leader_pending: None,
             leader_panel: false,
             chip_areas: Vec::new(),
@@ -655,7 +663,7 @@ impl App {
             // Shown in the tab bar like a peer tab's. The command run is `command`.
             def: TabDef {
                 name: "Chat".to_owned(),
-                key: Some('c'),
+                key: self.config.keys[&Action::Chat].clone(),
                 mode: Mode::Lazy,
                 command: CLAUDE.to_owned(),
             },
@@ -940,8 +948,9 @@ impl App {
         let view = &mut self.views[index];
         if view.bridge(event, &mut self.next_key, size, &self.ptys) {
             let cwd = view.cwd.display().to_string();
+            let rerun = ui::key_hint(&self.config, Action::RerunTab);
             self.notify(format!(
-                "claude moved to {cwd}; tabs still running stay put, leader Enter runs one there"
+                "claude moved to {cwd}; tabs still running stay put, {rerun} runs one there"
             ));
             return;
         }
@@ -1107,14 +1116,20 @@ impl App {
             self.on_leader_key(key);
             return;
         }
-        if self.leader.matches(&key) {
+        if keys::matches(self.config.leader, &key) {
             self.leader_pending = Some(Instant::now());
+            return;
+        }
+        // A key of ccs's own, without the leader: it doesn't reach the terminal.
+        if let Some(command) = self.command_for(&key, false) {
+            self.run_command(command);
             return;
         }
         self.key_to_terminal(key);
     }
 
-    /// Gives `key` to the terminal on screen: every key but the leader, Ctrl+C included.
+    /// Gives `key` to the terminal on screen: every key but the leader and ccs's own, Ctrl+C
+    /// included.
     fn key_to_terminal(&mut self, key: KeyEvent) {
         let view = &mut self.views[self.active];
         if let Some(index) = view.tab.checked_sub(1) {
@@ -1164,8 +1179,9 @@ impl App {
         match self.views.iter().find(|v| v.merge_running()) {
             Some(view) if !again => {
                 let name = ui::session_name(view);
+                let quit = ui::key_hint(&self.config, Action::Quit);
                 self.quit_refused = Some(Instant::now());
-                self.notify(format!("{name} is merging: leader q again to quit anyway"));
+                self.notify(format!("{name} is merging: {quit} again to quit anyway"));
             }
             _ => self.quit = true,
         }
@@ -1263,7 +1279,7 @@ impl App {
         let message = panel.commit_message().map(str::to_owned);
         let tab_def = TabDef {
             name: def.name.clone(),
-            key: None,
+            key: Bindings::default(),
             mode: Mode::Lazy,
             command: merge::script(def, message.is_some()),
         };
@@ -1332,8 +1348,9 @@ impl App {
                     Place::Repo => &view.repo,
                 };
                 let dir = dir.display();
+                let merge = ui::key_hint(&self.config, Action::Merge);
                 self.notify(format!(
-                    "{name} stopped on conflicts in {dir}: fix them, then leader m again"
+                    "{name} stopped on conflicts in {dir}: fix them, then {merge} again"
                 ));
             }
             (Outcome::Failed, _) => self.notify(format!("{name} failed ({status}): see its tab")),
@@ -1491,56 +1508,85 @@ impl App {
         }
     }
 
-    /// The key after the leader: a session or tab to go to, or a shortcut. The config keeps
-    /// tabs off these keys (`LEADER_KEYS`).
+    /// The key after the leader: a session or tab to go to, or a shortcut.
     fn on_leader_key(&mut self, key: KeyEvent) {
-        let count = self.views.len();
-        let view = &mut self.views[self.active];
-        let peer = view.tab.checked_sub(1);
         // Twice: the program in the tab gets it.
-        if self.leader.matches(&key) {
-            if let Some(pty) = &mut view.terminal_mut().pty {
-                pty.key(self.leader.event());
+        if keys::matches(self.config.leader, &key) {
+            let leader = keys::event(self.config.leader);
+            if let Some(pty) = &mut self.views[self.active].terminal_mut().pty {
+                pty.key(leader);
             }
             return;
         }
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return;
+        if let Some(command) = self.command_for(&key, true) {
+            self.run_command(command);
         }
+    }
+
+    /// What `key` does in the tab on screen, after the leader or on its own: go to a peer tab
+    /// whose key it is, or an action that works there. The config keeps them off each other's.
+    fn command_for(&self, key: &KeyEvent, after_leader: bool) -> Option<Command> {
+        let view = &self.views[self.active];
+        let is = |bindings: &Bindings| {
+            bindings
+                .0
+                .iter()
+                .any(|b| b.leader == after_leader && keys::matches(b.key, key))
+        };
+        if let Some(index) = view.tabs.iter().position(|t| is(&t.def.key)) {
+            return Some(Command::Tab(index + 1));
+        }
+        let peer = view.tab > 0;
+        self.config
+            .keys
+            .iter()
+            .find(|&(action, bindings)| action.works_in(peer) && is(bindings))
+            .map(|(&action, _)| Command::Action(action))
+    }
+
+    fn run_command(&mut self, command: Command) {
+        let action = match command {
+            Command::Tab(tab) => return self.select_tab(tab),
+            Command::Action(action) => action,
+        };
+        let count = self.views.len();
+        let view = &self.views[self.active];
         let (tab, tabs) = (view.tab, view.tabs.len() + 1);
-        match key.code {
-            // Runs the tab's command again, stopping it first if it is still running. In Chat,
-            // submits and opens a session without a worktree.
-            KeyCode::Enter => match peer {
-                Some(index) => self.start_tab(self.active, index),
-                None => self.submit(Then::OpenPlain),
-            },
-            KeyCode::Char('w') if peer.is_none() => self.submit(Then::Stay),
-            KeyCode::Char('n') => self.open_new(true),
-            KeyCode::Char('N') => self.open_new(false),
-            KeyCode::Char(c @ '1'..='9') => {
-                let index = c as usize - '1' as usize;
-                if index < count {
-                    self.active = index;
+        if let Some(index) = action.session() {
+            if index < count {
+                self.active = index;
+            }
+            return;
+        }
+        match action {
+            // Stops the tab's command first if it is still running.
+            Action::RerunTab => {
+                if let Some(index) = tab.checked_sub(1) {
+                    self.start_tab(self.active, index);
                 }
             }
-            KeyCode::Char(',') => self.active = (self.active + count - 1) % count,
-            KeyCode::Char('.') => self.active = (self.active + 1) % count,
-            KeyCode::Char('f') => self.open_finder(),
-            KeyCode::Char('m') => self.open_merge(),
-            KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Char('c') => self.select_tab(0),
-            KeyCode::Char('[') => self.select_tab((tab + tabs - 1) % tabs),
-            KeyCode::Char(']') => self.select_tab((tab + 1) % tabs),
-            KeyCode::Char(c) => {
-                if let Some(index) = view.tabs.iter().position(|t| t.def.key == Some(c)) {
-                    self.select_tab(index + 1);
-                }
-            }
-            _ => {}
+            Action::SubmitAndNewSession => self.submit(Then::OpenPlain),
+            Action::SubmitAndStay => self.submit(Then::Stay),
+            Action::NewSession => self.open_new(true),
+            Action::NewSessionNoWorktree => self.open_new(false),
+            Action::PreviousSession => self.active = (self.active + count - 1) % count,
+            Action::NextSession => self.active = (self.active + 1) % count,
+            Action::Find => self.open_finder(),
+            Action::Merge => self.open_merge(),
+            Action::Quit => self.request_quit(),
+            Action::Chat => self.select_tab(0),
+            Action::PreviousTab => self.select_tab((tab + tabs - 1) % tabs),
+            Action::NextTab => self.select_tab((tab + 1) % tabs),
+            // Above.
+            Action::Session1
+            | Action::Session2
+            | Action::Session3
+            | Action::Session4
+            | Action::Session5
+            | Action::Session6
+            | Action::Session7
+            | Action::Session8
+            | Action::Session9 => {}
         }
     }
 
@@ -1684,7 +1730,10 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use ccs_claude::session::State::{Asleep, Idle, Starting, WaitingPermission, Working};
-    use ccs_core::config::{MERGE_COMMIT, MergeDef};
+    use ccs_core::{
+        config::{MERGE_COMMIT, MergeDef},
+        keys::Key,
+    };
     use crossterm::event::MouseEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1749,8 +1798,7 @@ mod tests {
     fn app() -> App {
         let (scans, _) = mpsc::unbounded_channel();
         let (ptys, _) = mpsc::unbounded_channel();
-        let leader = KeyMatch::parse("ctrl-space").unwrap();
-        App::new(Config::default(), leader, scans, ptys, PathBuf::new(), None)
+        App::new(Config::default(), scans, ptys, PathBuf::new(), None)
     }
 
     /// A session in `cwd` whose Claude never ran.
@@ -1765,7 +1813,7 @@ mod tests {
             claude: Tab {
                 def: TabDef {
                     name: "Chat".into(),
-                    key: Some('c'),
+                    key: Bindings::after_leader(Key::char('c')),
                     mode: Mode::Lazy,
                     command: CLAUDE.into(),
                 },
@@ -1844,6 +1892,56 @@ mod tests {
     }
 
     #[test]
+    fn keys_of_the_config_work_with_the_leader_or_without() {
+        let cwd = std::env::temp_dir();
+        let mut app = app();
+        app.config = Config::parse(
+            "[keys]\nsession_2 = [\"<leader>2\", \"<A-2>\"]\nquit = \"<leader>x\"\n\
+             submit_and_stay = \"<A-w>\"\n\
+             [[tab]]\nname = \"shell\"\ncommand = \"cat\"\nkey = \"<A-s>\"",
+        )
+        .unwrap();
+        for key in 0..2 {
+            let mut view = view(key, cwd.clone());
+            view.tabs.push(Tab {
+                def: app.config.tabs[0].clone(),
+                pty: None,
+                key: key + 10,
+                exited: None,
+                error: None,
+            });
+            app.views.push(view);
+        }
+        let press =
+            |app: &mut App, c, modifiers| app.on_key(KeyEvent::new(KeyCode::Char(c), modifiers));
+
+        // Alt-2, without the leader, goes to session 2; nothing reaches Claude.
+        press(&mut app, '2', KeyModifiers::ALT);
+        assert_eq!(app.active, 1);
+        assert!(app.views[1].last_key.is_none());
+        // Alt-s goes to the tab; there, Alt-w doesn't submit anything: it is the program's.
+        press(&mut app, 's', KeyModifiers::ALT);
+        assert_eq!(app.views[1].tab, 1);
+        let alt_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT);
+        assert!(app.command_for(&alt_w, false).is_none());
+        app.views[1].tab = 0;
+        assert!(matches!(
+            app.command_for(&alt_w, false),
+            Some(Command::Action(Action::SubmitAndStay))
+        ));
+
+        // The leader still goes to session 2, and x quits in place of q.
+        app.active = 0;
+        press(&mut app, ' ', KeyModifiers::CONTROL);
+        press(&mut app, '2', KeyModifiers::NONE);
+        assert_eq!(app.active, 1);
+        app.on_leader_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.quit);
+        app.on_leader_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.quit);
+    }
+
+    #[test]
     fn the_spare_stays_out_of_sight() {
         let cwd = std::env::temp_dir();
         let mut app = app();
@@ -1871,7 +1969,7 @@ mod tests {
     fn tab_def(name: &str, mode: Mode) -> TabDef {
         TabDef {
             name: name.into(),
-            key: None,
+            key: Bindings::default(),
             mode,
             command: "cat".into(),
         }
@@ -2242,8 +2340,7 @@ mod tests {
     fn app_with_ptys() -> (App, PtyEvents) {
         let (scans, _) = mpsc::unbounded_channel();
         let (ptys, events) = mpsc::unbounded_channel();
-        let leader = KeyMatch::parse("ctrl-space").unwrap();
-        let mut app = App::new(Config::default(), leader, scans, ptys, PathBuf::new(), None);
+        let mut app = App::new(Config::default(), scans, ptys, PathBuf::new(), None);
         app.next_key = 10;
         (app, events)
     }
