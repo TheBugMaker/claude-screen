@@ -5,7 +5,7 @@ import type { EngineInterface, Register } from 'claude-code'
 /** One report; `ev` names it. */
 type Report =
   | { ev: 'ready'; session_id: string; root: string }
-  | { ev: 'submitted' | 'working' | 'permission' | 'approved' | 'denied' | 'idle' }
+  | { ev: 'submitted' | 'working' | 'permission' | 'approved' | 'denied' | 'asleep' | 'idle' }
   | { ev: 'title'; title: string }
   | { ev: 'root'; root: string }
 
@@ -84,6 +84,17 @@ export const register: Register = on => {
     if (root !== undefined && now !== root) {
       root = now
       report($, { ev: 'root', root })
+    }
+    return result
+  })
+  // Just before an answered turn completes; an interrupted one has none. Background work or a
+  // scheduled wakeup still to come starts the next turn without you.
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    // A Stop hook that blocks keeps the turn going.
+    const wakes = (e.background_tasks?.length ?? 0) + (e.session_crons?.length ?? 0)
+    if (e.agent_id === undefined && result.block === undefined && wakes > 0) {
+      report($, { ev: 'asleep' })
     }
     return result
   })

@@ -98,6 +98,7 @@ struct Section {
     selection: Option<String>,
     starting: Option<String>,
     idle: Option<String>,
+    asleep: Option<String>,
     working: Option<String>,
     waiting: Option<String>,
     error: Option<String>,
@@ -120,6 +121,7 @@ pub struct Theme {
     /// The states of the sessions.
     pub starting: Color,
     pub idle: Color,
+    pub asleep: Color,
     pub working: Color,
     pub waiting: Color,
     /// Notices, and what failed.
@@ -147,6 +149,8 @@ impl Default for Theme {
             selection: Color::Indexed(236),
             starting: Color::DarkGray,
             idle: Color::Green,
+            // Not your turn, as working is; the glyph says it is in the background.
+            asleep: Color::Yellow,
             working: Color::Yellow,
             waiting: Color::Magenta,
             error: Color::Red,
@@ -206,6 +210,7 @@ impl Theme {
                 default.starting,
             )?,
             idle: pick("idle", ccs.idle.as_deref(), "success", default.idle)?,
+            asleep: pick("asleep", ccs.asleep.as_deref(), "warning", default.asleep)?,
             working: pick(
                 "working",
                 ccs.working.as_deref(),
