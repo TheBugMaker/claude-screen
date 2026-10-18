@@ -61,7 +61,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 ### M4: Workgroup tabs
 - [x] Load `[[tab]]` definitions from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml))
 - [x] Peer tabs running any command in a pseudo-terminal (`git diff`, `$SHELL`, `lazygit`, …)
-- [x] `CS_*` environment variables in every tab: `CS_CWD`, `CS_REPO`, `CS_BRANCH`, `CS_GIT_BASE`, `CS_SESSION_ID`
+- [x] `CS_*` environment variables in every tab: `CS_CWD`, `CS_REPO`, `CS_BRANCH`, `CS_REPO_BRANCH`, `CS_GIT_BASE`, `CS_SESSION_ID`
 - [ ] Parameters as `CS_*` environment variables, asked for by prompt or picker (changed files)
 - [x] Each session in its own git worktree (`claude --worktree`), its tabs there too; `worktree = false` turns it off
 - [x] Tab modes: `eager`, `lazy`, `regular`
@@ -70,6 +70,12 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] Resize tabs with the window, including hidden ones
 - [x] Review tab: runs a preconfigured command, by default `git diff`
 - [x] Terminal tab: opens a shell in the project directory, by default `$SHELL`, configurable
+
+### Merge
+- [x] leader m commits a session's changes, with a message you type, and merges its branch into the main checkout's branch
+- [x] `[[merge]]` actions in the config, any shell command: merge, push, open a pull request, rebase; Tab picks one
+- [x] The action runs in a tab of the session, so passphrases and other prompts work; a successful one closes the session and removes its worktree
+- [x] Conflicts go to a Claude that can work where they are: a new session in the main checkout, or the session's own Claude in its worktree
 
 ### Themes
 - [x] One theme file colors Claude, ccs, the mods and every tab
@@ -101,16 +107,28 @@ Everything else starts with the leader, Ctrl-Space, then one key:
 | `,` / `.` | Previous / next session |
 | `n` / `N` | Open a new session in this project: in a worktree of its own (unless `worktree = false`) / in the main checkout, without a worktree |
 | `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
+| `m` | Commit and merge the session's work: see [Merging a session](#merging-a-session) |
 | `c` / a tab's key | Go to the Chat tab / that tab |
 | `[` / `]` | Previous / next tab |
 | Enter | In the Chat tab: submit the prompt, then open a new session in the main checkout, without a worktree, even if another one is waiting. In a terminal tab: run the tab's command again, stopping it first if it is still running |
 | `w` | In the Chat tab: submit the prompt and stay |
-| `q` | Quit |
+| `q` | Quit. While a merge runs, it takes `q` again |
 | Ctrl-Space | Send Ctrl-Space to the program in the tab, Claude included |
 
 Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. The leader is set with `leader = "ctrl-a"` and similar. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long, and `slide_ms = 0` switches at once.
 
 Each session is a plain `claude` with your own settings, plugins and permission mode; ccs only adds its mods. ccs loads them from this repository's `mods`, so a ccs binary needs its source tree for now. Start ccs from your own terminal rather than from inside a Claude Code session, whose `CLAUDE_CODE_*` variables would reach the sessions.
+
+## Merging a session
+
+Claude Code keeps a session that works in a worktree out of the main checkout: its git commands can't reach it. ccs isn't the session, so it can do this step for you. Press the leader, then `m`:
+
+1. A panel shows the branch and where it goes (the branch checked out in the main checkout), its commits, and the files not committed yet. When there are some, it asks for a commit message, prefilled with the session's title (Ctrl-J, or Shift-Enter where your terminal reports it, for a new line). With several `[[merge]]` actions, Tab picks one. Enter runs it, Esc cancels.
+2. The action runs in a tab of the session: first its `commit` (by default `git add -A && git commit -m "$CS_MESSAGE"`) when there is something to commit, then its `command`. The default command merges the session's branch in the main checkout, if that has no uncommitted changes. A session that works on that branch itself, without a worktree, only commits.
+3. When the command exits 0, the session closes and its worktree goes, if nothing in it would be lost. After the last session, a new one opens.
+4. When it stops on conflicts, a Claude that can work where they are gets the action's `on_conflict` prompt. For conflicts in the main checkout, that's a new session there, without a worktree. Once it has committed the merge, it closes along with the session merged. If the merge is aborted instead, both stay. For conflicts in the session's worktree, as with an action that merges or rebases onto the main checkout's branch first, the session's own Claude gets it, and you press leader `m` again once it's done.
+
+Leader `m` does nothing while Claude is working, waiting for you, or waiting on background work, nor when there is nothing to merge. Only one merge runs in a main checkout at a time. Any other action fails with a notice and leaves its tab open; leader `m` runs it again. `[[merge]]` entries in the config replace the default; [`config/example.toml`](config/example.toml) has the default and examples that push, open a pull request, or rebase.
 
 ## Themes
 

@@ -4,11 +4,12 @@
 # a `review` tab (git diff) and a `shell` tab ($SHELL). Commands run with `sh -c` in the
 # session's directory (its worktree, when it has one), with TERM=xterm-256color and:
 #
-#   CS_CWD         the session's directory
-#   CS_REPO        where the session started: the main checkout when it has a worktree
-#   CS_BRANCH      the branch checked out in CS_CWD
-#   CS_GIT_BASE    the commit the session's worktree started from
-#   CS_SESSION_ID  Claude's session id
+#   CS_CWD          the session's directory
+#   CS_REPO         where the session started: the main checkout when it has a worktree
+#   CS_BRANCH       the branch checked out in CS_CWD
+#   CS_REPO_BRANCH  the branch checked out in CS_REPO, which leader m merges into
+#   CS_GIT_BASE     the commit the session's worktree started from
+#   CS_SESSION_ID   Claude's session id
 #
 # Each is empty when there is none, or before Claude reports it. For example:
 # command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
@@ -23,8 +24,9 @@
 # command has exited to do the same.
 
 # Press the leader, then c / a tab's key / [ ] to switch tabs, 1-9 / , . to switch
-# sessions, n / N to open one (N: without a worktree), f to find one, q to quit. In the
-# Chat tab, Enter submits and opens a session without a worktree, w submits and stays.
+# sessions, n / N to open one (N: without a worktree), f to find one, m to commit and merge
+# its work (see [[merge]] below), q to quit. In the Chat tab, Enter submits and opens a
+# session without a worktree, w submits and stays.
 # Press it twice to send it to the program in the tab, Claude included. A tab's key can't
 # be one of these.
 leader = "ctrl-space"
@@ -60,6 +62,55 @@ command = "$SHELL"
 name = "git"
 key = "g"
 command = "lazygit"
+
+# Leader m gets the session's work into its target. A panel shows what will happen and asks
+# for a commit message when there is something to commit, prefilled with the session's title.
+# Enter runs the action in a tab of its own (passphrases and other prompts work there):
+#
+#   commit       runs first, in the session's directory, when it has changes; the message is
+#                in CS_MESSAGE (default: git add -A && git commit -m "$CS_MESSAGE")
+#   command      runs next, with the tab variables above. Exiting 0 means the work is in: the
+#                session closes, and its worktree goes if nothing in it would be lost
+#   on_conflict  when the command stops on conflicts, the prompt for the Claude that fixes
+#                them, with $CS_* names filled in: the session's own Claude for conflicts in its
+#                directory, a new session in the main checkout for conflicts there. Once the
+#                merge is in, both close. Without it, a conflict only gets a notice
+#
+# Leader m does nothing while Claude is working, nor when there is nothing to merge. With
+# several [[merge]], Tab picks one in the panel. This one is the default:
+[[merge]]
+name = "merge"
+command = '''
+set -e
+[ -n "$CS_REPO_BRANCH" ] || { echo "$CS_REPO is on no branch"; exit 1; }
+[ "$CS_BRANCH" != "$CS_REPO_BRANCH" ] || { echo "committed on $CS_BRANCH: nothing to merge"; exit 0; }
+cd "$CS_REPO"
+git diff --quiet HEAD || { echo "$CS_REPO has uncommitted changes, or an unfinished merge"; exit 1; }
+git merge --no-edit "$CS_BRANCH"'''
+on_conflict = """\
+Merging branch `$CS_BRANCH` into `$CS_REPO_BRANCH` stopped on conflicts in this checkout. \
+Resolve each conflict, keeping what both sides meant, and run the project's checks if it has \
+them. Then finish the merge with `git commit --no-edit`. If a conflict can't be resolved \
+safely, stop and explain it, and leave the merge unfinished."""
+
+# Others, for example:
+#
+# [[merge]]
+# name = "merge and push"
+# command = 'git -C "$CS_REPO" merge --no-edit "$CS_BRANCH" && git -C "$CS_REPO" push'
+#
+# # A session closed after its pull request is opened keeps its commits on the remote, but
+# # its worktree goes: resuming it later starts in the main checkout.
+# [[merge]]
+# name = "pull request"
+# command = 'git push -u origin "$CS_BRANCH" && gh pr create --fill --base "$CS_REPO_BRANCH" --head "$CS_BRANCH"'
+#
+# # Conflicts come up in the session's worktree, so its own Claude fixes them; then leader m
+# # again.
+# [[merge]]
+# name = "rebase"
+# command = 'git rebase "$CS_REPO_BRANCH" && git -C "$CS_REPO" merge --ff-only "$CS_BRANCH"'
+# on_conflict = "Rebasing onto $CS_REPO_BRANCH stopped on conflicts. Resolve them, then run git rebase --continue."
 
 # Planned, not parsed yet (ccs rejects these fields):
 #

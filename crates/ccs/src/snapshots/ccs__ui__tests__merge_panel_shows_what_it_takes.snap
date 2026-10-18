@@ -1,0 +1,22 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"       ╭ Merge · worktree-ccs-1 → main ───────────────────────╮       "
+"       │2 commits · 2 changed files                           │       "
+"       │   M src/app.rs                                       │       "
+"       │  ?? docs/merge.md                                    │       "
+"       │                                                      │       "
+"       │Commit message                                        │       "
+"       │› Add the merge action                                │       "
+"       │                                                      │       "
+"       │Action    merge    ‹ pull request ›                   │       "
+"       │Merging changes the files of 1 other session.         │       "
+"       │Type a commit message.                                │       "
+"       ╰ Enter pull request · Tab action · Esc cancel ────────╯       "
+"                                                                      "
+"                                                                      "
+"                                                                      "

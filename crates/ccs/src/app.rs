@@ -27,7 +27,9 @@ use tokio::{sync::mpsc, time::Instant};
 use crate::{
     finder::{self, Finder, OldSession, Scanned, Target},
     git,
+    input::Input,
     keys::KeyMatch,
+    merge::{self, MergePanel, Outcome, Place, Unmerged},
     theme::ClaudeTheme,
     ui,
 };
@@ -46,6 +48,8 @@ const WHEEL_STEP: u16 = 3;
 const LEADER_PANEL_DELAY: Duration = Duration::from_millis(200);
 /// How often a slide between sessions is drawn: about 60 times a second.
 const FRAME: Duration = Duration::from_millis(16);
+/// How soon leader q has to come again to quit while a merge runs.
+const QUIT_AGAIN: Duration = Duration::from_secs(3);
 
 pub struct App {
     pub views: Vec<View>,
@@ -79,9 +83,13 @@ pub struct App {
     theme: Option<ClaudeTheme>,
     /// What went wrong last, shown until the next key.
     pub notice: Option<String>,
+    /// `notice` is good news: a merge went in.
+    pub notice_ok: bool,
     /// The session on screen slides in over the one before it.
     slide: Option<Slide>,
     quit: bool,
+    /// When leader q was refused because a merge runs: again soon after, it quits.
+    quit_refused: Option<Instant>,
     /// How the last Claude failed, when that is why ccs quits.
     failure: Option<color_eyre::Report>,
 }
@@ -105,13 +113,62 @@ pub struct View {
     pub claude: Tab,
     /// When the last key went to `claude`, and what a prompt it submits does next.
     last_key: Option<(Instant, Then)>,
-    /// Peer tabs, from the config.
+    /// Peer tabs, from the config, then the merge tab while there is one.
     pub tabs: Vec<Tab>,
     /// The tab on screen: 0 is Chat, then `tabs[tab - 1]`.
     pub tab: usize,
+    /// The last merge of the session's work (leader m).
+    merge: Option<MergeRun>,
+}
+
+/// A merge of a session's work: its `[[merge]]` running in a tab, and what came of it.
+struct MergeRun {
+    /// The `[[merge]]`, by its place in the config.
+    action: usize,
+    /// The key of the merge tab's terminal.
+    tab: u64,
+    /// The variables it ran with, which its conflict prompt is filled in from too.
+    env: Vec<(&'static str, String)>,
+    /// The conflicts there were before it ran.
+    before: Unmerged,
+    /// The branch the work goes into, checked out in the session's `repo`.
+    target: String,
+    /// The session fixing the conflicts it stopped on in the main checkout.
+    fixer: Option<Fixer>,
+}
+
+/// A session started in the main checkout to fix the conflicts of a merge there.
+struct Fixer {
+    key: u64,
+    /// The commit merged, which the target has once the merge is done.
+    tip: String,
 }
 
 impl View {
+    /// Where the merge tab is in `tabs`, if there is one.
+    fn merge_tab(&self) -> Option<usize> {
+        let key = self.merge.as_ref()?.tab;
+        self.tabs.iter().position(|t| t.key == key)
+    }
+
+    /// The tab on screen is the merge tab.
+    pub fn on_merge_tab(&self) -> bool {
+        self.tab
+            .checked_sub(1)
+            .is_some_and(|index| Some(index) == self.merge_tab())
+    }
+
+    /// Its merge tab is running.
+    fn merge_running(&self) -> bool {
+        self.merge_tab()
+            .is_some_and(|index| !self.tabs[index].finished())
+    }
+
+    /// Its merge is under way: running, or waiting for a session to fix its conflicts.
+    fn merging(&self) -> bool {
+        self.merge_running() || self.merge.as_ref().is_some_and(|m| m.fixer.is_some())
+    }
+
     /// The terminal on screen: Claude's in the Chat tab, or a peer tab's.
     pub fn terminal(&self) -> &Tab {
         match self.tab.checked_sub(1) {
@@ -135,6 +192,10 @@ impl View {
             ("CS_CWD", path(&self.cwd)),
             ("CS_REPO", path(&self.repo)),
             ("CS_BRANCH", git::branch(&self.cwd).unwrap_or_default()),
+            (
+                "CS_REPO_BRANCH",
+                git::branch(&self.repo).unwrap_or_default(),
+            ),
             (
                 "CS_GIT_BASE",
                 self.worktree
@@ -267,6 +328,7 @@ impl Tab {
 
 pub enum Modal {
     Find(Finder),
+    Merge(MergePanel),
 }
 
 /// A switch between sessions, drawn as the new one pushing the old one off the screen.
@@ -308,8 +370,10 @@ impl App {
             bridge,
             theme,
             notice: None,
+            notice_ok: false,
             slide: None,
             quit: false,
+            quit_refused: None,
             failure: None,
         }
     }
@@ -350,7 +414,7 @@ impl App {
                 tracing::info!(key = spare.key, "the spare claude is the new session");
                 spare
             }
-            None => self.spawn_view(repo.clone(), past, worktree)?,
+            None => self.spawn_view(repo.clone(), past, worktree, None)?,
         };
         let ready = view.session.state() != State::Starting;
         self.views.push(view);
@@ -367,7 +431,7 @@ impl App {
         if self.spare.as_ref().is_some_and(|spare| spare.repo == repo) {
             return;
         }
-        match self.spawn_view(repo.to_owned(), None, true) {
+        match self.spawn_view(repo.to_owned(), None, true, None) {
             Ok(spare) => {
                 if let Some(old) = self.spare.replace(spare) {
                     self.discard(old);
@@ -380,12 +444,13 @@ impl App {
 
     /// Starts Claude in `repo`, resuming `past`, as a session not on screen yet. A new session
     /// gets a worktree of its own, if `worktree`, the config wants one and `repo` has a commit to
-    /// start from.
+    /// start from. Claude starts on `prompt`, if given.
     fn spawn_view(
         &mut self,
         repo: PathBuf,
         past: Option<&PastSession>,
         worktree: bool,
+        prompt: Option<&str>,
     ) -> color_eyre::Result<View> {
         let mut session = Session::default();
         // Known before Claude reports it, so the finder doesn't offer it again.
@@ -415,6 +480,7 @@ impl App {
             &repo,
             past.map(|p| p.id.as_str()),
             worktree.as_ref().map(|w| w.name.as_str()),
+            prompt,
         )?;
         self.next_key += 1;
         // A resumed session goes back to where it was, if that is still there: Claude goes back
@@ -434,6 +500,7 @@ impl App {
             last_key: None,
             tabs: Vec::new(),
             tab: 0,
+            merge: None,
         };
         self.peer_tabs(&mut view);
         Ok(view)
@@ -464,9 +531,9 @@ impl App {
     }
 
     /// Runs the command of `views[view].tabs[index]`, again if it ran before. Not while Claude
-    /// is still making the worktree it runs in.
+    /// is still making the worktree it runs in, and never the merge tab: leader m runs a merge.
     fn start_tab(&mut self, view: usize, index: usize) {
-        if self.views[view].waiting {
+        if self.views[view].waiting || self.views[view].merge_tab() == Some(index) {
             return;
         }
         let key = self.next_key;
@@ -514,13 +581,15 @@ impl App {
     }
 
     /// Starts Claude in `cwd`, resuming `resume`, or in a new worktree `worktree`, with the
-    /// bridge mod reporting as session `key`. Its terminal's events come with `key` too.
+    /// bridge mod reporting as session `key`, on `prompt` if given. Its terminal's events come
+    /// with `key` too.
     fn spawn_claude(
         &self,
         key: u64,
         cwd: &Path,
         resume: Option<&str>,
         worktree: Option<&str>,
+        prompt: Option<&str>,
     ) -> color_eyre::Result<Tab> {
         let mut args = vec![CLAUDE.to_owned(), "--plugin-dir".into(), quoted(MODS)];
         let mut settings = serde_json::Map::new();
@@ -543,6 +612,9 @@ impl App {
         }
         if let Some(id) = resume {
             args.extend(["--resume".into(), quoted(id)]);
+        }
+        if let Some(prompt) = prompt {
+            args.push(quoted(prompt));
         }
         let command = args.join(" ");
         let exe = std::env::current_exe().wrap_err("finding the ccs executable")?;
@@ -581,6 +653,14 @@ impl App {
     fn notify(&mut self, text: String) {
         tracing::warn!("{text}");
         self.notice = Some(text);
+        self.notice_ok = false;
+    }
+
+    /// Shows good news `text` until the next key, and logs it.
+    fn inform(&mut self, text: String) {
+        tracing::info!("{text}");
+        self.notice = Some(text);
+        self.notice_ok = true;
     }
 
     /// Goes to the session that needs you most, or opens a new one if none is waiting.
@@ -703,7 +783,8 @@ impl App {
                     .flat_map(|v| &mut v.tabs)
                     .find(|t| t.key == key && t.pty.is_some())
                 {
-                    tab.exited = Some(status);
+                    tab.exited = Some(status.clone());
+                    self.merge_ended(key, &status);
                 }
             }
         }
@@ -732,9 +813,9 @@ impl App {
         let repo = view.repo.clone();
         // In case it got as far as making it.
         if let Some(worktree) = worktree {
-            self.remove_worktree(repo.clone(), worktree);
+            self.remove_worktree(repo.clone(), worktree.name);
         }
-        match self.spawn_claude(key, &repo, None, None) {
+        match self.spawn_claude(key, &repo, None, None, None) {
             Ok(claude) => {
                 let view = &mut self.views[index];
                 view.claude = claude;
@@ -756,21 +837,17 @@ impl App {
             ..
         } = view;
         if let Some(worktree) = worktree.filter(|_| session.name.is_none()) {
-            self.remove_worktree(repo, worktree);
+            self.remove_worktree(repo, worktree.name);
         }
     }
 
-    /// Removes `worktree` of `repo` on a thread, if nothing in it would be lost.
-    fn remove_worktree(&mut self, repo: PathBuf, worktree: Worktree) {
+    /// Removes the worktree `name` of `repo` on a thread, if nothing in it would be lost.
+    fn remove_worktree(&mut self, repo: PathBuf, name: String) {
         self.cleanups.push(std::thread::spawn(move || {
-            match git::remove_if_unused(&repo, &worktree.name) {
-                Ok(true) => tracing::info!(name = worktree.name, "removed the unused worktree"),
-                Ok(false) => {
-                    tracing::info!(name = worktree.name, "the worktree holds work, or is gone");
-                }
-                Err(err) => {
-                    tracing::warn!(name = worktree.name, "removing the worktree failed: {err}");
-                }
+            match git::remove_if_unused(&repo, &name) {
+                Ok(true) => tracing::info!(name, "removed the unused worktree"),
+                Ok(false) => tracing::info!(name, "the worktree holds work, or is gone"),
+                Err(err) => tracing::warn!(name, "removing the worktree failed: {err}"),
             }
         }));
     }
@@ -812,8 +889,10 @@ impl App {
                 ui::session_name(&view)
             ));
         }
+        let key = view.key;
         // After /exit Claude has removed its worktree, or asked; this is for a Claude that crashed.
         self.discard(view);
+        self.check_fixer(key, true);
     }
 
     /// A report of the bridge mod in session `key`'s Claude.
@@ -864,6 +943,9 @@ impl App {
                 Then::OpenPlain => self.open_new(false),
             }
         }
+        if idle {
+            self.check_fixer(key, false);
+        }
     }
 
     fn on_scan(&mut self, cwd: &Path, result: Result<Vec<OldSession>, String>) {
@@ -895,6 +977,11 @@ impl App {
                     Some(Modal::Find(finder)) => {
                         finder.query.insert(&text.replace('\n', " "));
                         finder.refresh();
+                    }
+                    Some(Modal::Merge(panel)) => {
+                        if !panel.changes.is_empty() {
+                            panel.message.insert(&text);
+                        }
                     }
                     None => {
                         if let Some(pty) = &mut self.views[self.active].terminal_mut().pty {
@@ -1018,6 +1105,342 @@ impl App {
         });
     }
 
+    /// Quits, unless a merge is running: killing it could leave the merge half done. Then it
+    /// takes leader q again, soon after.
+    fn request_quit(&mut self) {
+        let again = self
+            .quit_refused
+            .is_some_and(|at| at.elapsed() < QUIT_AGAIN);
+        match self.views.iter().find(|v| v.merge_running()) {
+            Some(view) if !again => {
+                let name = ui::session_name(view);
+                self.quit_refused = Some(Instant::now());
+                self.notify(format!("{name} is merging: leader q again to quit anyway"));
+            }
+            _ => self.quit = true,
+        }
+    }
+
+    /// Opens the merge panel for the session on screen (leader m), or says why there is nothing
+    /// it could do now.
+    fn open_merge(&mut self) {
+        match self.merge_panel() {
+            Ok(panel) => self.modal = Some(Modal::Merge(panel)),
+            Err(why) => self.notify(why),
+        }
+    }
+
+    /// What leader m would take from the session on screen, or why it can't now.
+    fn merge_panel(&self) -> Result<MergePanel, String> {
+        if self.config.merges.is_empty() {
+            return Err("no [[merge]] action in the config".into());
+        }
+        let view = &self.views[self.active];
+        match view.session.state() {
+            State::Idle => {}
+            State::Starting => return Err("Claude is still starting: merge once it's ready".into()),
+            // Background work too: the merge closes the session, which would stop it.
+            State::Working | State::WaitingPermission | State::Asleep => {
+                return Err("Claude is working: merge when it's done".into());
+            }
+        }
+        // They would get in each other's way in the main checkout.
+        if let Some(other) = self
+            .views
+            .iter()
+            .find(|v| v.repo == view.repo && v.merging())
+        {
+            return Err(format!(
+                "{} is merging there already: one merge at a time",
+                ui::session_name(other)
+            ));
+        }
+        let branch = git::branch(&view.cwd).ok_or("this session is on no branch")?;
+        let target = git::branch(&view.repo);
+        let changes = git::changes(&view.cwd)?;
+        let ahead = match &target {
+            Some(target) => git::ahead(&view.cwd, target)?,
+            None => 0,
+        };
+        // Doing nothing would still close the session.
+        if changes.is_empty()
+            && let Some(target) = &target
+        {
+            if *target == branch {
+                return Err(format!("nothing to commit on {branch}"));
+            }
+            if ahead == 0 {
+                return Err(format!("nothing to merge: {branch} is in {target} already"));
+            }
+        }
+        let plain = target.as_ref() == Some(&branch);
+        let others = self
+            .views
+            .iter()
+            .filter(|v| !plain && v.key != view.key && v.cwd == view.repo)
+            .count();
+        let mut message = Input::default();
+        let title = view
+            .session
+            .name
+            .as_ref()
+            .or(view.session.ai_title.as_ref());
+        if !changes.is_empty()
+            && let Some(title) = title
+        {
+            message.insert(title);
+        }
+        Ok(MergePanel {
+            view: view.key,
+            branch,
+            target,
+            changes,
+            ahead,
+            others,
+            message,
+            action: 0,
+            needs_message: false,
+        })
+    }
+
+    /// Runs the `[[merge]]` picked in `panel` in a merge tab of its session, and shows the tab.
+    fn run_merge(&mut self, panel: MergePanel) {
+        // Closed since.
+        let Some(index) = self.views.iter().position(|v| v.key == panel.view) else {
+            return;
+        };
+        let def = &self.config.merges[panel.action];
+        let message = panel.commit_message().map(str::to_owned);
+        let tab_def = TabDef {
+            name: def.name.clone(),
+            key: None,
+            mode: Mode::Lazy,
+            command: merge::script(def, message.is_some()),
+        };
+        let key = self.next_key;
+        self.next_key += 1;
+        let size = ui::terminal_size(self.window);
+        let view = &mut self.views[index];
+        // The one before is over: leader m runs only then.
+        if let Some(old) = view.merge_tab() {
+            view.tabs.remove(old);
+        }
+        let before = Unmerged {
+            cwd: git::unmerged(&view.cwd),
+            repo: git::unmerged(&view.repo),
+        };
+        let mut env = view.tab_env();
+        env.push(("CS_MESSAGE", message.unwrap_or_default()));
+        let mut tab = Tab {
+            def: tab_def,
+            pty: None,
+            key,
+            exited: None,
+            error: None,
+        };
+        tab.start(&view.cwd, &env, key, size, self.ptys.clone());
+        view.tabs.push(tab);
+        view.tab = view.tabs.len();
+        view.merge = Some(MergeRun {
+            action: panel.action,
+            tab: key,
+            env,
+            before,
+            target: panel.target.unwrap_or_default(),
+            fixer: None,
+        });
+    }
+
+    /// The merge tab with terminal `key` exited with `status`. Closes its session if the work is
+    /// in, or hands the conflicts it stopped on to the Claude that can work where they are.
+    fn merge_ended(&mut self, key: u64, status: &str) {
+        let Some(index) = self
+            .views
+            .iter()
+            .position(|v| v.merge.as_ref().is_some_and(|m| m.tab == key))
+        else {
+            return;
+        };
+        let view = &self.views[index];
+        let Some(run) = &view.merge else {
+            return;
+        };
+        let after = Unmerged {
+            cwd: git::unmerged(&view.cwd),
+            repo: git::unmerged(&view.repo),
+        };
+        let def = &self.config.merges[run.action];
+        let name = def.name.clone();
+        let prompt = def.on_conflict.as_ref().map(|p| merge::expand(p, &run.env));
+        match (merge::outcome(status, run.before, after), prompt) {
+            (Outcome::Merged, _) => self.merged(index),
+            (Outcome::Conflict(Place::Cwd), Some(prompt)) => self.prompt_claude(index, &prompt),
+            (Outcome::Conflict(Place::Repo), Some(prompt)) => self.open_fixer(index, &prompt),
+            (Outcome::Conflict(place), None) => {
+                let dir = match place {
+                    Place::Cwd => &view.cwd,
+                    Place::Repo => &view.repo,
+                };
+                let dir = dir.display();
+                self.notify(format!(
+                    "{name} stopped on conflicts in {dir}: fix them, then leader m again"
+                ));
+            }
+            (Outcome::Failed, _) => self.notify(format!("{name} failed ({status}): see its tab")),
+        }
+    }
+
+    /// The work of session `index` is in its target. The session closes, and its worktree goes
+    /// if nothing in it would be lost, even if the session is named. After the last session, a
+    /// new one opens where it started. Not while Claude is busy, which closing would stop.
+    fn merged(&mut self, index: usize) {
+        let view = &mut self.views[index];
+        let name = ui::session_name(view);
+        let target = match &mut view.merge {
+            Some(run) => {
+                run.fixer = None;
+                run.target.clone()
+            }
+            None => String::new(),
+        };
+        if view.session.state() != State::Idle {
+            self.inform(format!(
+                "merged {name} into {target}; Claude is busy, so the session stays open"
+            ));
+            return;
+        }
+        let view = self.drop_view(index);
+        let repo = view.repo.clone();
+        let worktree = match &view.worktree {
+            Some(worktree) => Some(worktree.name.clone()),
+            // Resumed, or moved there.
+            None => worktree_name(&view.cwd),
+        };
+        // Ends its programs, Claude's too, before its worktree goes.
+        drop(view);
+        if let Some(worktree) = worktree {
+            self.remove_worktree(repo.clone(), worktree);
+        }
+        if self.views.is_empty()
+            && let Err(err) = self.open(&repo, None, true)
+        {
+            // `run` stops before drawing again, and drawing needs a session.
+            self.quit = true;
+            self.failure = Some(err.wrap_err(format!("merged {name}, then opening a session")));
+            return;
+        }
+        self.inform(format!("merged {name} into {target}"));
+    }
+
+    /// Takes session `index` away, and keeps the one on screen, or the next if it was that one.
+    /// Dropping it ends its programs.
+    fn drop_view(&mut self, index: usize) -> View {
+        let view = self.views.remove(index);
+        if !self.views.is_empty() {
+            self.active = active_after_close(self.active, index, self.views.len());
+        }
+        // The finder lists open sessions by their place, and those after it moved up.
+        if let Some(Modal::Find(finder)) = &mut self.modal {
+            finder.relist(&self.views);
+        }
+        view
+    }
+
+    /// Starts a session in the main checkout of session `index`, without a worktree, on `prompt`,
+    /// to fix the conflicts its merge stopped on there. Goes there if you are on `index`.
+    fn open_fixer(&mut self, index: usize, prompt: &str) {
+        let repo = self.views[index].repo.clone();
+        let tip = git::head(&self.views[index].cwd).unwrap_or_default();
+        match self.spawn_view(repo.clone(), None, false, Some(prompt)) {
+            Ok(fixer) => {
+                if let Some(run) = &mut self.views[index].merge {
+                    run.fixer = Some(Fixer {
+                        key: fixer.key,
+                        tip,
+                    });
+                }
+                let name = ui::session_name(&self.views[index]);
+                self.views.push(fixer);
+                let fixer = self.views.len();
+                if self.active == index {
+                    self.active = fixer - 1;
+                } else {
+                    self.notify(format!(
+                        "merging {name} stopped on conflicts: session {fixer} is fixing them"
+                    ));
+                }
+            }
+            Err(err) => self.notify(format!(
+                "starting a session to fix the conflicts failed: {err:#}; fix them in {}, or \
+                 git merge --abort",
+                repo.display()
+            )),
+        }
+    }
+
+    /// Types `text` into the Claude of session `index` and submits it. You stay where you are,
+    /// in its Chat if you are on it.
+    fn prompt_claude(&mut self, index: usize, text: &str) {
+        let watching = self.active == index;
+        let view = &mut self.views[index];
+        let Some(pty) = &mut view.claude.pty else {
+            return;
+        };
+        pty.paste(text);
+        pty.key(KeyEvent::from(KeyCode::Enter));
+        // So its `submitted` report doesn't move you on.
+        view.last_key = Some((Instant::now(), Then::Stay));
+        if watching {
+            view.tab = 0;
+        } else {
+            let name = ui::session_name(view);
+            self.notify(format!(
+                "merging {name} stopped on conflicts: its Claude is fixing them"
+            ));
+        }
+    }
+
+    /// Session `key`, which may be fixing the conflicts of a merge in its main checkout, went
+    /// idle, or `closed`. Once the merge is in, it and the session merged close. A merge that was
+    /// aborted, or is unfinished as the session closes, is let go, and you are told.
+    fn check_fixer(&mut self, key: u64, closed: bool) {
+        let Some(index) = self.views.iter().position(|v| {
+            v.merge
+                .as_ref()
+                .and_then(|m| m.fixer.as_ref())
+                .is_some_and(|f| f.key == key)
+        }) else {
+            return;
+        };
+        let view = &mut self.views[index];
+        let Some(run) = &mut view.merge else {
+            return;
+        };
+        let Some(fixer) = &run.fixer else {
+            return;
+        };
+        let stopped = git::unmerged(&view.repo) || git::merging(&view.repo);
+        let target = run.target.clone();
+        if !stopped && git::contains(&view.repo, &fixer.tip, &target) {
+            let merged = view.key;
+            if !closed && let Some(fixer) = self.views.iter().position(|v| v.key == key) {
+                drop(self.drop_view(fixer));
+            }
+            if let Some(index) = self.views.iter().position(|v| v.key == merged) {
+                self.merged(index);
+            }
+        } else if !stopped {
+            run.fixer = None;
+            self.notify(format!("the merge into {target} was aborted"));
+        } else if closed {
+            run.fixer = None;
+            let repo = view.repo.display().to_string();
+            self.notify(format!(
+                "the merge into {target} is unfinished in {repo}: fix it, or git merge --abort"
+            ));
+        }
+    }
+
     /// The key after the leader: a session or tab to go to, or a shortcut. The config keeps
     /// tabs off these keys (`LEADER_KEYS`).
     fn on_leader_key(&mut self, key: KeyEvent) {
@@ -1057,7 +1480,8 @@ impl App {
             KeyCode::Char(',') => self.active = (self.active + count - 1) % count,
             KeyCode::Char('.') => self.active = (self.active + 1) % count,
             KeyCode::Char('f') => self.open_finder(),
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('m') => self.open_merge(),
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('c') => self.select_tab(0),
             KeyCode::Char('[') => self.select_tab((tab + tabs - 1) % tabs),
             KeyCode::Char(']') => self.select_tab((tab + 1) % tabs),
@@ -1073,6 +1497,30 @@ impl App {
     fn on_modal_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.modal = None;
+            return;
+        }
+        if let Some(Modal::Merge(panel)) = &mut self.modal {
+            let count = self.config.merges.len();
+            let newline = key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Tab => panel.action = (panel.action + 1) % count,
+                KeyCode::BackTab => panel.action = (panel.action + count - 1) % count,
+                KeyCode::Enter if !newline => {
+                    if panel.commit_message() == Some("") {
+                        panel.needs_message = true;
+                    } else if let Some(Modal::Merge(panel)) = self.modal.take() {
+                        self.run_merge(panel);
+                    }
+                }
+                // Only a message to type: nothing else in the panel takes keys.
+                _ => {
+                    if !panel.changes.is_empty() && panel.message.handle_key(key) {
+                        panel.needs_message = false;
+                    }
+                }
+            }
             return;
         }
         let Some(Modal::Find(finder)) = &mut self.modal else {
@@ -1109,6 +1557,14 @@ impl App {
             }
         }
     }
+}
+
+/// The name of the worktree at `cwd`, if it is one Claude made: `.claude/worktrees/<name>`.
+fn worktree_name(cwd: &Path) -> Option<String> {
+    if !cwd.parent()?.ends_with(".claude/worktrees") {
+        return None;
+    }
+    cwd.file_name()?.to_str().map(str::to_owned)
 }
 
 /// Where to start Claude to resume a session that ran in `cwd`. From the main checkout for a
@@ -1172,6 +1628,7 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use ccs_claude::session::State::{Asleep, Idle, Starting, WaitingPermission, Working};
+    use ccs_core::config::{MERGE_COMMIT, MergeDef};
     use crossterm::event::MouseEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1242,6 +1699,7 @@ mod tests {
             last_key: None,
             tabs: Vec::new(),
             tab: 0,
+            merge: None,
         }
     }
 
@@ -1503,7 +1961,12 @@ mod tests {
         assert_eq!(before["CS_CWD"], path(&repo));
         assert_eq!(before["CS_REPO"], path(&repo));
         // Not known yet, or not there: empty, but set.
-        for name in ["CS_BRANCH", "CS_GIT_BASE", "CS_SESSION_ID"] {
+        for name in [
+            "CS_BRANCH",
+            "CS_REPO_BRANCH",
+            "CS_GIT_BASE",
+            "CS_SESSION_ID",
+        ] {
             assert_eq!(before[name], "", "{name}");
         }
         view.cwd = repo.join(".claude/worktrees/ccs-0");
@@ -1611,5 +2074,352 @@ mod tests {
         assert_eq!(tab.exited.as_deref(), Some("exit 0"));
         assert_eq!(app.views.len(), 1);
         assert!(app.notice.is_none() && !app.quit);
+    }
+
+    type PtyEvents = mpsc::UnboundedReceiver<(u64, PtyEvent)>;
+
+    /// An app with no session, whose terminals report to the receiver it comes with. Its keys
+    /// start past those of the sessions the tests make.
+    fn app_with_ptys() -> (App, PtyEvents) {
+        let (scans, _) = mpsc::unbounded_channel();
+        let (ptys, events) = mpsc::unbounded_channel();
+        let leader = KeyMatch::parse("ctrl-space").unwrap();
+        let mut app = App::new(Config::default(), leader, scans, ptys, PathBuf::new(), None);
+        app.next_key = 10;
+        (app, events)
+    }
+
+    /// Waits for terminal `key` to exit, and tells `app`.
+    fn wait_exit(app: &mut App, events: &mut PtyEvents, key: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match events.try_recv() {
+                Ok((at, PtyEvent::Exited(status))) if at == key => {
+                    return app.on_pty(at, PtyEvent::Exited(status));
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        panic!("terminal {key} didn't exit");
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?}: {stderr}");
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A repository with one commit on `main`, and a worktree `ccs-1` on `worktree-ccs-1` as
+    /// Claude makes it. Their paths, canonical.
+    fn merge_repo(name: &str) -> (PathBuf, PathBuf) {
+        let repo = std::env::temp_dir().join(format!("ccs-merge-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        // Whatever your own git config says.
+        for (key, value) in [
+            ("user.name", "ccs"),
+            ("user.email", "ccs@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            run_git(&repo, &["config", key, value]);
+        }
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        run_git(&repo, &["add", "a.txt"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+        git::exclude_worktrees(&repo).unwrap();
+        let tree = repo.join(".claude/worktrees/ccs-1");
+        let path = tree.to_str().unwrap();
+        run_git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "worktree-ccs-1", path],
+        );
+        (repo.canonicalize().unwrap(), tree.canonicalize().unwrap())
+    }
+
+    /// A session started in `repo`, working in `cwd`, waiting for a prompt.
+    fn ready_view(key: u64, repo: &Path, cwd: &Path) -> View {
+        let mut view = view(key, repo.to_owned());
+        view.cwd = cwd.to_owned();
+        view.session.bridge(Bridge::Ready {
+            session_id: format!("s{key}"),
+            root: cwd.to_owned(),
+        });
+        view
+    }
+
+    fn leader_key(app: &mut App, code: KeyCode) {
+        app.on_leader_key(KeyEvent::from(code));
+    }
+
+    fn modal_keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_modal_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    /// Runs the merge the panel on screen shows, and waits for it to end.
+    fn merge(app: &mut App, events: &mut PtyEvents) {
+        app.on_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.modal.is_none(), "{:?}", app.notice);
+        let view = &app.views[app.active];
+        assert!(view.on_merge_tab());
+        let key = view.tabs.last().unwrap().key;
+        wait_exit(app, events, key);
+    }
+
+    fn keys(app: &App) -> Vec<u64> {
+        app.views.iter().map(|v| v.key).collect()
+    }
+
+    #[test]
+    fn leader_m_commits_merges_and_closes_the_session() {
+        let (repo, tree) = merge_repo("in");
+        let (mut app, mut events) = app_with_ptys();
+        // Not the last session, which would start a Claude in its place.
+        app.views.push(view(0, repo.clone()));
+        let mut view = ready_view(1, &repo, &tree);
+        view.session.name = Some("Add b".into());
+        app.views.push(view);
+        app.active = 1;
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        let Some(Modal::Merge(panel)) = &app.modal else {
+            panic!("no panel: {:?}", app.notice);
+        };
+        assert_eq!(panel.branch, "worktree-ccs-1");
+        assert_eq!(panel.target.as_deref(), Some("main"));
+        assert_eq!(panel.changes, ["?? b.txt"]);
+        // Prefilled with the session's name.
+        assert_eq!(panel.message.text(), "Add b");
+        merge(&mut app, &mut events);
+        // The session closed, its worktree went, and main has its commit.
+        assert_eq!(keys(&app), [0]);
+        assert_eq!(app.notice.as_deref(), Some("merged Add b into main"));
+        assert!(app.notice_ok);
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        assert!(!tree.exists());
+        assert_eq!(run_git(&repo, &["log", "--format=%s"]), "Add b\ninit");
+        assert_eq!(
+            run_git(&repo, &["branch", "--format=%(refname:short)"]),
+            "main"
+        );
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn leader_m_waits_for_claude_and_for_something_to_merge() {
+        let (repo, tree) = merge_repo("refuse");
+        let mut app = app();
+        app.views.push(ready_view(0, &repo, &tree));
+        let refused = |app: &mut App| {
+            leader_key(app, KeyCode::Char('m'));
+            assert!(app.modal.is_none());
+            app.notice.take().unwrap_or_default()
+        };
+        assert_eq!(
+            refused(&mut app),
+            "nothing to merge: worktree-ccs-1 is in main already"
+        );
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        // Working, or waiting on background work, which closing the session would stop.
+        app.views[0].session.bridge(Bridge::Submitted);
+        assert_eq!(refused(&mut app), "Claude is working: merge when it's done");
+        app.views[0].session.bridge(Bridge::Asleep);
+        app.views[0].session.bridge(Bridge::Idle);
+        assert_eq!(app.views[0].session.state(), State::Asleep);
+        assert_eq!(refused(&mut app), "Claude is working: merge when it's done");
+        app.views[0].session.bridge(Bridge::Submitted);
+        app.views[0].session.bridge(Bridge::Idle);
+        leader_key(&mut app, KeyCode::Char('m'));
+        assert!(matches!(app.modal, Some(Modal::Merge(_))));
+        // A message it has to have.
+        app.on_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(&app.modal, Some(Modal::Merge(panel)) if panel.needs_message));
+        app.modal = None;
+
+        // A session in the main checkout, on main, with nothing to commit.
+        app.views[0].cwd.clone_from(&repo);
+        assert_eq!(refused(&mut app), "nothing to commit on main");
+        // Outside git.
+        let outside = scratch("merge-nogit");
+        app.views[0].cwd.clone_from(&outside);
+        assert_eq!(refused(&mut app), "this session is on no branch");
+        app.config.merges.clear();
+        assert_eq!(refused(&mut app), "no [[merge]] action in the config");
+        std::fs::remove_dir_all(&repo).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn conflicts_in_the_worktree_go_to_its_own_claude() {
+        let (repo, tree) = merge_repo("cwd");
+        let (mut app, mut events) = app_with_ptys();
+        app.config.merges = vec![MergeDef {
+            name: "update".into(),
+            commit: MERGE_COMMIT.into(),
+            command: "git merge --no-edit main".into(),
+            on_conflict: Some("Fix the merge of $CS_REPO_BRANCH into ${CS_BRANCH}.".into()),
+        }];
+        let mut view = ready_view(0, &repo, &tree);
+        // In place of Claude, to take the prompt.
+        let pty = Pty::spawn("cat", &tree, &[], (80, 24), 0, app.ptys.clone()).unwrap();
+        view.claude.pty = Some(pty);
+        app.views.push(view);
+        // The same line, changed on both sides.
+        std::fs::write(tree.join("a.txt"), "tree\n").unwrap();
+        run_git(&tree, &["commit", "-qam", "tree"]);
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        run_git(&repo, &["commit", "-qam", "main"]);
+        leader_key(&mut app, KeyCode::Char('m'));
+        merge(&mut app, &mut events);
+        assert!(git::unmerged(&tree));
+        assert_eq!(app.notice, None);
+        // You are taken to its Chat, and its prompt being submitted keeps you there.
+        let view = &app.views[0];
+        assert_eq!(view.tab, 0);
+        assert!(matches!(view.last_key, Some((_, Then::Stay))));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let wanted = "Fix the merge of main into worktree-ccs-1.";
+        while !view
+            .claude
+            .pty
+            .as_ref()
+            .unwrap()
+            .contents()
+            .contains(wanted)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the prompt never came"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    /// Two sessions of a repository, the second on screen with a commit that conflicts with main,
+    /// merged into the main checkout, where it stopped. No Claude starts to fix it.
+    fn conflict_in_main(name: &str) -> (App, PathBuf, PathBuf) {
+        let (repo, tree) = merge_repo(name);
+        let (mut app, mut events) = app_with_ptys();
+        app.config.merges[0].on_conflict = None;
+        app.views.push(ready_view(0, &repo, &repo));
+        app.views.push(ready_view(1, &repo, &tree));
+        app.active = 1;
+        std::fs::write(tree.join("a.txt"), "tree\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        run_git(&repo, &["commit", "-qam", "main"]);
+        leader_key(&mut app, KeyCode::Char('m'));
+        modal_keys(&mut app, "Change a");
+        merge(&mut app, &mut events);
+        let notice = app.notice.take().unwrap_or_default();
+        assert!(
+            notice.starts_with("merge stopped on conflicts in"),
+            "{notice}"
+        );
+        assert!(git::unmerged(&repo));
+        assert_eq!(keys(&app), [0, 1]);
+        // A session fixing it, as one started with the conflict prompt would.
+        app.views.push(ready_view(2, &repo, &repo));
+        let tip = git::head(&tree).unwrap();
+        app.views[1].merge.as_mut().unwrap().fixer = Some(Fixer { key: 2, tip });
+        (app, repo, tree)
+    }
+
+    #[test]
+    fn a_merge_fixed_in_the_main_checkout_closes_both_sessions() {
+        let (mut app, repo, tree) = conflict_in_main("fixed");
+        // Still in conflict: going idle changes nothing.
+        app.on_bridge(2, Bridge::Idle);
+        assert_eq!(keys(&app), [0, 1, 2]);
+        // Nothing else merges there meanwhile.
+        app.active = 0;
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        let notice = app.notice.take().unwrap_or_default();
+        assert!(
+            notice.ends_with("is merging there already: one merge at a time"),
+            "{notice}"
+        );
+        std::fs::remove_file(repo.join("c.txt")).unwrap();
+        // Fixed, and the merge committed.
+        std::fs::write(repo.join("a.txt"), "both\n").unwrap();
+        run_git(&repo, &["commit", "-qam", "merged"]);
+        app.on_bridge(2, Bridge::Idle);
+        assert_eq!(keys(&app), [0]);
+        assert_eq!(app.notice.as_deref(), Some("merged new into main"));
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        assert!(!tree.exists());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn an_aborted_merge_lets_both_sessions_be() {
+        let (mut app, repo, _) = conflict_in_main("aborted");
+        run_git(&repo, &["merge", "--abort"]);
+        app.on_bridge(2, Bridge::Idle);
+        assert_eq!(keys(&app), [0, 1, 2]);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("the merge into main was aborted")
+        );
+        assert!(!app.views[1].merging());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn a_running_merge_holds_quitting_and_a_finished_one_does_not_run_again() {
+        let (repo, tree) = merge_repo("quit");
+        let (mut app, mut events) = app_with_ptys();
+        // Waits for a line, then fails.
+        app.config.merges[0].command = "read line; exit 1".into();
+        app.views.push(ready_view(0, &repo, &tree));
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        modal_keys(&mut app, "Add b");
+        app.on_modal_key(KeyEvent::from(KeyCode::Enter));
+        let key = app.views[0].tabs.last().unwrap().key;
+        leader_key(&mut app, KeyCode::Char('q'));
+        assert!(!app.quit);
+        let notice = app.notice.take().unwrap_or_default();
+        assert!(
+            notice.ends_with("leader q again to quit anyway"),
+            "{notice}"
+        );
+        leader_key(&mut app, KeyCode::Char('q'));
+        assert!(app.quit);
+        app.quit = false;
+        // Keys go to it while it runs.
+        app.key_to_terminal(KeyEvent::from(KeyCode::Enter));
+        wait_exit(&mut app, &mut events, key);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("merge failed (exit 1): see its tab")
+        );
+        assert_eq!(keys(&app), [0]);
+        // Over: neither Enter nor leader Enter runs it again.
+        app.key_to_terminal(KeyEvent::from(KeyCode::Enter));
+        leader_key(&mut app, KeyCode::Enter);
+        assert_eq!(app.views[0].tabs.last().unwrap().key, key);
+        // The commit stays.
+        assert_eq!(run_git(&tree, &["log", "-1", "--format=%s"]), "Add b");
+        leader_key(&mut app, KeyCode::Char('q'));
+        assert!(app.quit);
+        std::fs::remove_dir_all(&repo).unwrap();
     }
 }

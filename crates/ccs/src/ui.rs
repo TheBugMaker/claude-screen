@@ -13,11 +13,14 @@ use ratatui::{
 use crate::{
     app::{App, Modal, Tab, View},
     finder::{Finder, Target},
+    merge::MergePanel,
     theme,
 };
 
 /// Between two tabs in the tab bar.
 const TAB_GAP: &str = " ── ";
+/// The most changed files the merge panel lists.
+const MERGE_CHANGES: usize = 8;
 
 /// The rows of the screen: session bar, tab rule, terminal, bottom rule.
 fn layout(area: Rect) -> [Rect; 4] {
@@ -75,7 +78,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             forward,
         );
     }
-    let left = rule_status(app.notice.as_deref(), tab, view.tab > 0);
+    let notice = app.notice.as_deref().map(|text| (text, app.notice_ok));
+    let left = rule_status(notice, tab, view.tab > 0, view.on_merge_tab());
     render_rule(frame, status, left, leader_hint(app));
     render_leader(frame, app, status);
     render_modal(frame, app);
@@ -164,9 +168,148 @@ pub fn session_name(view: &View) -> String {
 }
 
 fn render_modal(frame: &mut Frame, app: &mut App) {
-    if let Some(Modal::Find(finder)) = &mut app.modal {
-        let view_states: Vec<State> = app.views.iter().map(|v| v.session.state()).collect();
-        render_finder(frame, finder, &view_states);
+    match &mut app.modal {
+        Some(Modal::Find(finder)) => {
+            let view_states: Vec<State> = app.views.iter().map(|v| v.session.state()).collect();
+            render_finder(frame, finder, &view_states);
+        }
+        Some(Modal::Merge(panel)) => {
+            let actions: Vec<&str> = app.config.merges.iter().map(|m| m.name.as_str()).collect();
+            render_merge(frame, panel, &actions);
+        }
+        None => {}
+    }
+}
+
+/// The merge panel over everything else: what leader m takes, the commit message when there is
+/// something to commit, and the `actions` to pick from.
+fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
+    let theme = theme::get();
+    let title = match &panel.target {
+        _ if panel.plain() => format!(" Commit · {} ", panel.branch),
+        Some(target) => format!(" Merge · {} → {target} ", panel.branch),
+        None => format!(" Merge · {} ", panel.branch),
+    };
+    let committing = !panel.changes.is_empty();
+    let mut keys = format!(" Enter {} ", actions[panel.action]);
+    if actions.len() > 1 {
+        keys.push_str("· Tab action ");
+    }
+    keys.push_str("· Esc cancel ");
+    let block = theme::popup(title).title_bottom(Line::from(keys).fg(theme.dim));
+    let mut bottom = merge_notes(panel, actions);
+
+    // As wide as the finder, and as high as it needs to be, if it fits.
+    let width = frame.area().width / 5 * 4;
+    // The message wraps in the room the panel has, after its border and its `› `.
+    let (rows, cursor) = panel.message.layout(width.saturating_sub(4));
+    let height = |lines: usize| u16::try_from(lines).unwrap_or(u16::MAX);
+    // A blank line before each part.
+    let message_height = if committing {
+        height(rows.len() + 2)
+    } else {
+        0
+    };
+    let bottom_height = if bottom.is_empty() {
+        0
+    } else {
+        height(bottom.len() + 1)
+    };
+    let changes = panel.changes.len().min(MERGE_CHANGES);
+    let wanted = height(1 + changes + 2) + message_height + bottom_height;
+    let area = frame
+        .area()
+        .centered(Constraint::Length(width), Constraint::Length(wanted));
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [top, message, rest] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(message_height),
+        Constraint::Length(bottom_height),
+    ])
+    .areas(inner);
+
+    let mut counts = Vec::new();
+    if panel.ahead > 0 {
+        counts.push(plural(panel.ahead, "commit"));
+    }
+    if committing {
+        counts.push(plural(panel.changes.len(), "changed file"));
+    }
+    let mut lines = vec![Line::from(counts.join(" · "))];
+    // As many changes as fit, and how many more there are.
+    let room = usize::from(top.height).saturating_sub(1).min(MERGE_CHANGES);
+    let shown = if panel.changes.len() > room {
+        room.saturating_sub(1)
+    } else {
+        panel.changes.len()
+    };
+    lines.extend(
+        panel.changes[..shown]
+            .iter()
+            .map(|change| Line::from(format!("  {change}")).fg(theme.dim)),
+    );
+    if shown < panel.changes.len() {
+        lines.push(Line::from(format!("  … {} more", panel.changes.len() - shown)).fg(theme.dim));
+    }
+    frame.render_widget(Paragraph::new(lines), top);
+
+    if committing {
+        let mut lines = vec![Line::default(), Line::from("Commit message").fg(theme.dim)];
+        lines.extend(rows.into_iter().enumerate().map(|(i, row)| {
+            let gutter = if i == 0 { "› " } else { "  " };
+            Line::from(vec![Span::raw(gutter).fg(theme.accent), Span::raw(row)])
+        }));
+        frame.render_widget(Paragraph::new(lines), message);
+        let at = (message.x + 2 + cursor.0, message.y + 2 + cursor.1);
+        if message.contains(at.into()) {
+            frame.set_cursor_position(at);
+        }
+    }
+    if !bottom.is_empty() {
+        bottom.insert(0, Line::default());
+        frame.render_widget(Paragraph::new(bottom), rest);
+    }
+}
+
+/// The end of the merge panel: the `actions` to pick from when there are several, and what you
+/// should know before Enter.
+fn merge_notes(panel: &MergePanel, actions: &[&str]) -> Vec<Line<'static>> {
+    let theme = theme::get();
+    let mut notes = Vec::new();
+    if actions.len() > 1 {
+        let mut spans = vec![Span::raw("Action ").fg(theme.dim)];
+        for (i, name) in actions.iter().enumerate() {
+            spans.push(if i == panel.action {
+                Span::raw(format!(" ‹ {name} › ")).fg(theme.accent).bold()
+            } else {
+                Span::raw(format!("   {name}   "))
+            });
+        }
+        notes.push(Line::from(spans));
+    }
+    if panel.target.is_none() {
+        notes.push(Line::from("The main checkout is on no branch.").fg(theme.warning));
+    }
+    if panel.others > 0 {
+        let sessions = plural(panel.others, "other session");
+        notes.push(
+            Line::from(format!("Merging changes the files of {sessions}.")).fg(theme.warning),
+        );
+    }
+    if panel.needs_message {
+        notes.push(Line::from("Type a commit message.").fg(theme.error));
+    }
+    notes
+}
+
+/// `count` `thing`s, in words: `1 commit`, `2 commits`.
+fn plural(count: usize, thing: &str) -> String {
+    if count == 1 {
+        format!("1 {thing}")
+    } else {
+        format!("{count} {thing}s")
     }
 }
 
@@ -466,6 +609,7 @@ fn leader_actions(leader: &str, tabs: &[(char, &str)], peer: bool) -> Vec<(Strin
         ("n", "new session"),
         ("N", "new session, no worktree"),
         ("f", "find a session"),
+        ("m", "commit & merge"),
     ];
     let switch = [("[", "previous tab"), ("]", "next tab")];
     let enter: &[_] = if peer {
@@ -547,22 +691,38 @@ fn render_leader_panel(frame: &mut Frame, area: Rect, leader: &str, actions: &[(
     );
 }
 
-/// What the bottom rule says on the left: `notice`, else a peer tab's command and how it ended.
-/// Only a peer tab is run again (`peer`); Claude's session closes when it ends.
-fn rule_status(notice: Option<&str>, tab: &Tab, peer: bool) -> Line<'static> {
-    if let Some(notice) = notice {
-        return Line::from(notice.to_owned()).fg(theme::get().error);
+/// What the bottom rule says on the left: `notice` (with whether it is good news), else a peer
+/// tab's command and how it ended. Only a peer tab is run again (`peer`); Claude's session closes
+/// when it ends. The merge tab (`merge`) shows its action's name, and runs again by leader m.
+fn rule_status(notice: Option<(&str, bool)>, tab: &Tab, peer: bool, merge: bool) -> Line<'static> {
+    if let Some((notice, ok)) = notice {
+        let color = if ok {
+            theme::get().idle
+        } else {
+            theme::get().error
+        };
+        return Line::from(notice.to_owned()).fg(color);
     }
+    let again = if merge {
+        "leader m to try again"
+    } else {
+        "Enter re-runs"
+    };
     let ended = match (&tab.error, &tab.exited) {
         (Some(_), _) if peer => Span::raw("failed to start · Enter retries").fg(theme::get().error),
         (Some(_), _) => Span::raw("claude failed to start").fg(theme::get().error),
         (None, Some(status)) if peer => {
-            Span::raw(format!("exited ({status}) · Enter re-runs")).fg(theme::get().warning)
+            Span::raw(format!("exited ({status}) · {again}")).fg(theme::get().warning)
         }
         _ => Span::default(),
     };
     let mut spans = Vec::new();
-    if peer {
+    if merge {
+        spans.push(Span::raw(format!("merge: {}", tab.def.name)).fg(theme::get().dim));
+        if tab.finished() {
+            spans.push(Span::raw(" · ").fg(theme::get().dim));
+        }
+    } else if peer {
         spans.push(Span::raw(tab.def.command.clone()).fg(theme::get().dim));
         if tab.finished() {
             spans.push(Span::raw(" · ").fg(theme::get().dim));
@@ -751,11 +911,14 @@ mod tests {
     #[test]
     fn bottom_rule_says_how_a_tab_ended() {
         let mut review = tab("review", "git diff");
-        assert_eq!(rule_status(None, &review, true).to_string(), "git diff");
+        assert_eq!(
+            rule_status(None, &review, true, false).to_string(),
+            "git diff"
+        );
         review.exited = Some("exit 1".into());
         let rule = |width| {
             let terminal = draw(width, 1, |frame| {
-                let left = rule_status(None, &review, true);
+                let left = rule_status(None, &review, true, false);
                 render_rule(frame, frame.area(), left, Line::from("ctrl-space actions"));
             });
             terminal.backend().to_string()
@@ -766,12 +929,63 @@ mod tests {
 
         // Claude says nothing while it runs.
         let claude = tab("Chat", "claude");
-        assert_eq!(rule_status(None, &claude, false).to_string(), "");
-        // A notice comes first.
+        assert_eq!(rule_status(None, &claude, false, false).to_string(), "");
+        // A notice comes first, in red unless it is good news.
+        let notice = rule_status(Some(("resuming s1 failed", false)), &review, true, false);
+        assert_eq!(notice.to_string(), "resuming s1 failed");
+        assert_eq!(notice.style.fg, Some(theme::get().error));
+        let merged = rule_status(Some(("merged api into main", true)), &review, true, false);
+        assert_eq!(merged.style.fg, Some(theme::get().idle));
+
+        // The merge tab says which action ran, and isn't run again by Enter.
+        let mut merge = tab("pull request", "git push && gh pr create --fill");
         assert_eq!(
-            rule_status(Some("resuming s1 failed"), &review, true).to_string(),
-            "resuming s1 failed"
+            rule_status(None, &merge, true, true).to_string(),
+            "merge: pull request"
         );
+        merge.exited = Some("exit 1".into());
+        assert_eq!(
+            rule_status(None, &merge, true, true).to_string(),
+            "merge: pull request · exited (exit 1) · leader m to try again"
+        );
+    }
+
+    #[test]
+    fn merge_panel_shows_what_it_takes() {
+        let mut panel = MergePanel {
+            view: 0,
+            branch: "worktree-ccs-1".into(),
+            target: Some("main".into()),
+            changes: vec![" M src/app.rs".into(), "?? docs/merge.md".into()],
+            ahead: 2,
+            others: 1,
+            message: crate::input::Input::default(),
+            action: 1,
+            needs_message: true,
+        };
+        panel.message.insert("Add the merge action");
+        let mut terminal = Terminal::new(TestBackend::new(70, 18)).unwrap();
+        terminal
+            .draw(|frame| render_merge(frame, &panel, &["merge", "pull request"]))
+            .unwrap();
+        insta::assert_snapshot!(terminal.backend());
+
+        // Only commits to merge: no message to type. One action: none to pick.
+        panel.changes.clear();
+        panel.needs_message = false;
+        panel.action = 0;
+        let text = |panel: &MergePanel| {
+            let terminal = draw(70, 18, |frame| render_merge(frame, panel, &["merge"]));
+            terminal.backend().to_string()
+        };
+        let only_commits = text(&panel);
+        assert!(only_commits.contains("2 commits"), "{only_commits}");
+        assert!(!only_commits.contains("Commit message"), "{only_commits}");
+        assert!(!only_commits.contains("Action"), "{only_commits}");
+        // A session on the target branch itself only commits.
+        panel.branch = "main".into();
+        panel.changes = vec![" M src/app.rs".into()];
+        assert!(text(&panel).contains("Commit · main"));
     }
 
     #[test]

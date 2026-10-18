@@ -49,6 +49,36 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The changes in `dir` not committed yet, one per line as `git status --short` lists them.
+pub fn changes(dir: &Path) -> Result<Vec<String>, String> {
+    let status = git(dir, &["status", "--porcelain"])?;
+    Ok(status.lines().map(str::to_owned).collect())
+}
+
+/// How many commits HEAD in `dir` has that `branch` doesn't.
+pub fn ahead(dir: &Path, branch: &str) -> Result<usize, String> {
+    let range = format!("{branch}..HEAD");
+    let count = git(dir, &["rev-list", "--count", &range])?;
+    count
+        .parse()
+        .map_err(|err| format!("git rev-list --count: {err}"))
+}
+
+/// Some file in `dir` is in conflict, after a merge or a rebase that stopped on it.
+pub fn unmerged(dir: &Path) -> bool {
+    git(dir, &["ls-files", "--unmerged"]).is_ok_and(|files| !files.is_empty())
+}
+
+/// A merge in `dir` is under way: it stopped, and isn't committed or aborted yet.
+pub fn merging(dir: &Path) -> bool {
+    git(dir, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok()
+}
+
+/// `commit` is in `branch`.
+pub fn contains(dir: &Path, commit: &str, branch: &str) -> bool {
+    git(dir, &["merge-base", "--is-ancestor", commit, branch]).is_ok()
+}
+
 /// Keeps the worktrees Claude makes out of `git status` in the main checkout of `repo`, in the
 /// repository's own `info/exclude`, which is not committed.
 pub fn exclude_worktrees(repo: &Path) -> Result<(), String> {
@@ -264,6 +294,36 @@ mod tests {
         // A commit another branch has too is not lost.
         run(&repo, &["branch", "keep", "worktree-committed"]);
         assert!(remove_if_unused(&repo, "committed").unwrap());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn tells_what_a_merge_would_take_and_where_it_stopped() {
+        let repo = repo();
+        let tree = worktree(&repo, "ccs-1");
+        assert_eq!(changes(&tree).unwrap(), Vec::<String>::new());
+        assert_eq!(ahead(&tree, "main").unwrap(), 0);
+        std::fs::write(tree.join("a.txt"), "tree\n").unwrap();
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        assert_eq!(changes(&tree).unwrap(), [" M a.txt", "?? b.txt"]);
+        commit(&tree);
+        let tip = head(&tree).unwrap();
+        assert_eq!(ahead(&tree, "main").unwrap(), 1);
+        assert!(!contains(&repo, &tip, "main"));
+
+        // The same line changed on main: merging the worktree's branch there stops on it.
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        commit(&repo);
+        assert!(!unmerged(&repo) && !merging(&repo));
+        assert!(git(&repo, &["merge", "--no-edit", "worktree-ccs-1"]).is_err());
+        assert!(unmerged(&repo) && merging(&repo));
+        assert!(!unmerged(&tree));
+        // Fixed and committed, the worktree's commit is in main.
+        std::fs::write(repo.join("a.txt"), "both\n").unwrap();
+        run(&repo, &["add", "a.txt"]);
+        commit(&repo);
+        assert!(!unmerged(&repo) && !merging(&repo));
+        assert!(contains(&repo, &tip, "main"));
         std::fs::remove_dir_all(&repo).unwrap();
     }
 

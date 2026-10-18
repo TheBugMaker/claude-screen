@@ -8,6 +8,7 @@ mod hook;
 mod input;
 mod keys;
 mod logging;
+mod merge;
 mod socket;
 mod theme;
 mod ui;

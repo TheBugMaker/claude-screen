@@ -9,6 +9,7 @@ expression: terminal.backend()
 "   │          n ➜ new session              │"
 "   │          N ➜ new session, no worktree │"
 "   │          f ➜ find a session           │"
+"   │          m ➜ commit & merge           │"
 "   │          c ➜ Chat                     │"
 "   │          r ➜ review                   │"
 "   │          s ➜ shell                    │"
@@ -16,5 +17,4 @@ expression: terminal.backend()
 "   │          ] ➜ next tab                 │"
 "   │      Enter ➜ reload tab               │"
 "   │          q ➜ quit                     │"
-"   │ ctrl-space ➜ send to program          │"
 "   ╰ Esc cancel ───────────────────────────╯"
