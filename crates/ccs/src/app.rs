@@ -1610,7 +1610,7 @@ impl App {
 }
 
 /// The name of the worktree at `cwd`, if it is one Claude made: `.claude/worktrees/<name>`.
-fn worktree_name(cwd: &Path) -> Option<String> {
+pub(crate) fn worktree_name(cwd: &Path) -> Option<String> {
     if !cwd.parent()?.ends_with(".claude/worktrees") {
         return None;
     }

@@ -378,6 +378,11 @@ fn render_finder(frame: &mut Frame, finder: &mut Finder, states: &[State]) {
                     Span::raw(format!(" · {}", age(now, finder.old[i].past.modified)))
                         .fg(theme::get().dim),
                 );
+                match finder.old[i].merged {
+                    Some(true) => spans.push(Span::raw(" · merged").fg(theme::get().idle)),
+                    Some(false) => spans.push(Span::raw(" · not merged").fg(theme::get().warning)),
+                    None => {}
+                }
             }
             let mut text = Text::from(Line::from(spans));
             if let Some(prompt) = hit.prompt {
@@ -828,6 +833,7 @@ mod tests {
                 modified: SystemTime::now() - Duration::from_hours(3),
             },
             prompts: vec!["limit requests per user".into()],
+            merged: Some(true),
         }];
         finder.loading = false;
         finder.items = vec![

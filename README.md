@@ -108,7 +108,7 @@ Everything else starts with the leader, Ctrl-Space, then one key:
 | `1`–`9` | Go to session 1–9 |
 | `,` / `.` | Previous / next session |
 | `n` / `N` | Open a new session in this project: in a worktree of its own (unless `worktree = false`) / in the main checkout, without a worktree |
-| `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
+| `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. A past session from a worktree says `merged` once the reflog of the main checkout's branch shows the session's branch merged in, and `not merged` while the session's branch has commits that one doesn't (merges made in this clone only, as far back as the reflog goes). Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
 | `m` | Commit and merge the session's work: see [Merging a session](#merging-a-session) |
 | `c` / a tab's key | Go to the Chat tab / that tab |
 | `[` / `]` | Previous / next tab |

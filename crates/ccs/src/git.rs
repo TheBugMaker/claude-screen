@@ -79,6 +79,38 @@ pub fn contains(dir: &Path, commit: &str, branch: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", commit, branch]).is_ok()
 }
 
+/// The branches merged into `target` in `repo`, as its reflog has them: by `git merge`, fast
+/// forward or not, or by the commit that finished a merge that stopped on conflicts. Only merges
+/// made here, as far back as the reflog goes; they are found even after the branch is deleted.
+pub fn merged_into(repo: &Path, target: &str) -> Result<Vec<String>, String> {
+    let target = format!("refs/heads/{target}");
+    let log = git(repo, &["reflog", "show", "--format=%gs", &target])?;
+    Ok(log
+        .lines()
+        .filter_map(merged_branch)
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The branch a reflog entry merged: `merge <branch>: …`, or
+/// `commit (merge): Merge branch '<branch>'…`.
+fn merged_branch(entry: &str) -> Option<&str> {
+    if let Some(rest) = entry.strip_prefix("merge ") {
+        return rest.split_once(':').map(|(branch, _)| branch);
+    }
+    let rest = entry.strip_prefix("commit (merge): Merge branch '")?;
+    rest.split_once('\'').map(|(branch, _)| branch)
+}
+
+/// The branches in `repo` with commits `target` doesn't have.
+pub fn not_in(repo: &Path, target: &str) -> Result<Vec<String>, String> {
+    let list = git(
+        repo,
+        &["branch", "--format=%(refname:short)", "--no-merged", target],
+    )?;
+    Ok(list.lines().map(str::to_owned).collect())
+}
+
 /// Keeps the worktrees Claude makes out of `git status` in the main checkout of `repo`, in the
 /// repository's own `info/exclude`, which is not committed.
 pub fn exclude_worktrees(repo: &Path) -> Result<(), String> {
@@ -236,6 +268,26 @@ mod tests {
         git(repo, &["branch", "--format=%(refname:short)"]).unwrap()
     }
 
+    /// Runs `git args` in `dir` as someone who can commit.
+    fn as_user(dir: &Path, args: &[&str]) -> Result<String, String> {
+        let user = [
+            "-c",
+            "user.name=ccs",
+            "-c",
+            "user.email=ccs@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        git(dir, &[&user[..], args].concat())
+    }
+
+    /// Commits the new file `name` in `dir`.
+    fn commit_file(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), "new\n").unwrap();
+        run(dir, &["add", name]);
+        commit(dir);
+    }
+
     #[test]
     fn reads_head_and_branch() {
         let repo = repo();
@@ -325,6 +377,65 @@ mod tests {
         assert!(!unmerged(&repo) && !merging(&repo));
         assert!(contains(&repo, &tip, "main"));
         std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn finds_merged_branches_in_the_reflog() {
+        let repo = repo();
+        // Fast forward, and gone with its worktree after, as after leader m.
+        let ff = worktree(&repo, "ff");
+        commit_file(&ff, "ff.txt");
+        as_user(&repo, &["merge", "--no-edit", "worktree-ff"]).unwrap();
+        assert!(remove_if_unused(&repo, "ff").unwrap());
+        // A merge commit, main having moved on.
+        let ort = worktree(&repo, "ort");
+        commit_file(&ort, "ort.txt");
+        commit_file(&repo, "main.txt");
+        as_user(&repo, &["merge", "--no-edit", "worktree-ort"]).unwrap();
+        // Stopped on conflicts, then finished as Claude is asked to.
+        let fixed = worktree(&repo, "fixed");
+        std::fs::write(fixed.join("a.txt"), "fixed\n").unwrap();
+        commit(&fixed);
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        commit(&repo);
+        assert!(as_user(&repo, &["merge", "--no-edit", "worktree-fixed"]).is_err());
+        std::fs::write(repo.join("a.txt"), "both\n").unwrap();
+        run(&repo, &["add", "a.txt"]);
+        as_user(&repo, &["commit", "--no-edit"]).unwrap();
+        // Not merged, and nothing to merge.
+        commit_file(&worktree(&repo, "open"), "open.txt");
+        worktree(&repo, "fresh");
+
+        assert_eq!(
+            merged_into(&repo, "main").unwrap(),
+            ["worktree-fixed", "worktree-ort", "worktree-ff"]
+        );
+        assert_eq!(not_in(&repo, "main").unwrap(), ["worktree-open"]);
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn reads_the_branch_a_reflog_entry_merged() {
+        for (entry, branch) in [
+            ("merge worktree-ccs-1: Fast-forward", Some("worktree-ccs-1")),
+            (
+                "merge worktree-ccs-1: Merge made by the 'ort' strategy.",
+                Some("worktree-ccs-1"),
+            ),
+            (
+                "commit (merge): Merge branch 'worktree-ccs-1'",
+                Some("worktree-ccs-1"),
+            ),
+            (
+                "commit (merge): Merge branch 'worktree-ccs-1' into dev",
+                Some("worktree-ccs-1"),
+            ),
+            ("commit (merge): change", None),
+            ("commit: change", None),
+            ("commit (initial): first commit", None),
+        ] {
+            assert_eq!(merged_branch(entry), branch, "{entry}");
+        }
     }
 
     #[test]
