@@ -36,7 +36,8 @@ pub struct Config {
     pub leader: String,
     /// Name of the theme: a file in `~/.config/ccs/themes`, or a built-in one. Read by the app.
     pub theme: Option<String>,
-    /// How long switching sessions slides the new one in, in milliseconds; 0 switches at once.
+    /// How long switching sessions slides the new one in over 100 columns, in milliseconds: a
+    /// wider window takes longer, at the same speed. 0 switches at once.
     pub slide_ms: u64,
     /// Each new session works in its own git worktree, which Claude makes (`claude --worktree`),
     /// and its tabs run there. Sessions outside git, or before the first commit, get none.

@@ -338,6 +338,8 @@ struct Slide {
     /// The new session comes in from the right: its chip is after the old one's.
     forward: bool,
     started: Instant,
+    /// How long it takes: `slide_ms` for every 100 columns, so any width slides at one speed.
+    duration: Duration,
 }
 
 impl App {
@@ -679,7 +681,9 @@ impl App {
     /// Slides the session on screen in over `shown`, the key of the one on screen before, if
     /// that is another session and still open. A closed one, or none, gives way at once.
     fn slide_from(&mut self, shown: u64) {
-        if self.config.slide_ms == 0 || self.views.get(self.active).is_none_or(|v| v.key == shown) {
+        let duration =
+            Duration::from_millis(self.config.slide_ms * u64::from(self.window.width) / 100);
+        if duration.is_zero() || self.views.get(self.active).is_none_or(|v| v.key == shown) {
             return;
         }
         if let Some(from) = self.views.iter().position(|v| v.key == shown) {
@@ -687,6 +691,7 @@ impl App {
                 from: shown,
                 forward: self.active > from,
                 started: Instant::now(),
+                duration,
             });
         }
     }
@@ -696,7 +701,7 @@ impl App {
     pub fn slide(&self, width: u16) -> Option<(&View, u16, bool)> {
         let slide = self.slide.as_ref()?;
         let from = self.views.iter().find(|v| v.key == slide.from)?;
-        let total = u128::from(self.config.slide_ms);
+        let total = slide.duration.as_millis();
         let left = total.saturating_sub(slide.started.elapsed().as_millis());
         // Fast at first, slowing as it lands: what is still to come goes with the time left, cubed.
         let to_come = u128::from(width) * left.pow(3) / total.pow(3);
@@ -713,9 +718,8 @@ impl App {
     ) -> color_eyre::Result<()> {
         let mut terminal_events = EventStream::new();
         while !self.quit {
-            let duration = Duration::from_millis(self.config.slide_ms);
             // Over: the session on screen is all there.
-            self.slide.take_if(|s| s.started.elapsed() >= duration);
+            self.slide.take_if(|s| s.started.elapsed() >= s.duration);
             terminal.draw(|frame| ui::render(frame, &mut self))?;
             let shown = self.views[self.active].key;
             tokio::select! {
@@ -2025,6 +2029,7 @@ mod tests {
     fn switching_sessions_slides_in_from_the_side_of_the_chip() {
         let cwd = std::env::temp_dir();
         let mut app = app();
+        app.window = Rect::new(0, 0, 80, 24);
         for key in 0..3 {
             app.views.push(view(key, cwd.clone()));
         }
@@ -2046,12 +2051,29 @@ mod tests {
         app.slide.as_mut().unwrap().started -= Duration::from_secs(1);
         assert_eq!(app.slide(80).map(|(_, moved, _)| moved), Some(80));
 
+        // At one speed: twice as wide takes twice as long.
+        let took = |app: &App| app.slide.as_ref().map(|s| s.duration);
+        app.window = Rect::new(0, 0, 100, 24);
+        leader_key(&mut app, '.');
+        app.slide_from(2);
+        assert_eq!(took(&app), Some(Duration::from_millis(150)));
+        app.window = Rect::new(0, 0, 200, 24);
+        leader_key(&mut app, '.');
+        app.slide_from(0);
+        assert_eq!(took(&app), Some(Duration::from_millis(300)));
+
         // No switch, a session that closed since, or no slide in the config: no slide.
         app.slide = None;
-        app.slide_from(2);
+        app.slide_from(1);
         app.slide_from(7);
         assert_eq!(slid(&app), None);
         app.config.slide_ms = 0;
+        leader_key(&mut app, '.');
+        app.slide_from(1);
+        assert_eq!(slid(&app), None);
+        // Nor one too short to draw.
+        app.config.slide_ms = 1;
+        app.window = Rect::new(0, 0, 80, 24);
         leader_key(&mut app, '.');
         app.slide_from(2);
         assert_eq!(slid(&app), None);

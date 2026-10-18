@@ -37,7 +37,8 @@ leader = "ctrl-space"
 # theme = "gruvbox-dark"
 
 # Switching sessions slides the new one in from the side its chip is on, over this many
-# milliseconds. 0 switches at once.
+# milliseconds for every 100 columns, so a wider window slides at the same speed. 0 switches
+# at once.
 slide_ms = 150
 
 # Each new session works in its own git worktree and branch (`claude --worktree`), so sessions
