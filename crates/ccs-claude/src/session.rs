@@ -22,7 +22,8 @@ pub struct Session {
     pub session_id: Option<String>,
     /// The name given with `/rename`, Claude Code's custom title.
     pub name: Option<String>,
-    /// The title Claude generates for the conversation, read from its transcript.
+    /// The title Claude generates for the conversation, read from its transcript. Until it has
+    /// one, the bridge mod's guess.
     pub ai_title: Option<String>,
     /// Never `WaitingPermission` or `Asleep`: those come from `dialog` and `asleep`.
     phase: State,
@@ -65,6 +66,10 @@ impl Session {
                 self.phase = State::Idle;
             }
             Bridge::Title { title } => self.name = Some(title),
+            // Never over Claude's own title, which replaces it once Claude writes one.
+            Bridge::Guess { title } => {
+                self.ai_title.get_or_insert(title);
+            }
             // Where the session works is the app's.
             Bridge::Root { .. } => {}
         }
@@ -125,6 +130,21 @@ mod tests {
         session.bridge(Bridge::Permission);
         session.bridge(Bridge::Idle);
         assert_eq!(session.state(), State::Idle);
+    }
+
+    #[test]
+    fn a_guessed_title_waits_for_claude_s_own() {
+        let mut session = Session::default();
+        session.bridge(Bridge::Guess {
+            title: "Rate limiting".into(),
+        });
+        assert_eq!(session.ai_title.as_deref(), Some("Rate limiting"));
+        // A session Claude has titled keeps its title.
+        session.ai_title = Some("Rate limits per key".into());
+        session.bridge(Bridge::Guess {
+            title: "Something else".into(),
+        });
+        assert_eq!(session.ai_title.as_deref(), Some("Rate limits per key"));
     }
 
     #[test]

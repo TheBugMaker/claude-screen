@@ -52,6 +52,8 @@ const LEADER_PANEL_DELAY: Duration = Duration::from_millis(200);
 const FRAME: Duration = Duration::from_millis(16);
 /// How soon leader q has to come again to quit while a merge runs.
 const QUIT_AGAIN: Duration = Duration::from_secs(3);
+/// How often the transcript of a session in a turn is read for the title Claude gives it.
+const TITLE_EVERY: Duration = Duration::from_secs(1);
 
 pub struct App {
     pub views: Vec<View>,
@@ -89,6 +91,8 @@ pub struct App {
     pub notice_ok: bool,
     /// The session on screen slides in over the one before it.
     slide: Option<Slide>,
+    /// When the transcripts of sessions in a turn are read next.
+    titles_due: Instant,
     quit: bool,
     /// When leader q was refused because a merge runs: again soon after, it quits.
     quit_refused: Option<Instant>,
@@ -378,6 +382,7 @@ impl App {
             notice: None,
             notice_ok: false,
             slide: None,
+            titles_due: Instant::now(),
             quit: false,
             quit_refused: None,
             last_swipe: None,
@@ -745,6 +750,14 @@ impl App {
                     self.leader_pending.unwrap_or_else(Instant::now) + LEADER_PANEL_DELAY
                 ), if self.leader_pending.is_some() && !self.leader_panel => {
                     self.leader_panel = true;
+                }
+                // Claude's title for a session can come long before its turn ends.
+                () = tokio::time::sleep_until(self.titles_due),
+                    if self.views.iter().any(|v| in_turn(&v.session)) => {
+                    self.titles_due = Instant::now() + TITLE_EVERY;
+                    for view in self.views.iter_mut().filter(|v| in_turn(&v.session)) {
+                        refresh_ai_title(&mut view.session, &view.cwd);
+                    }
                 }
                 // The next frame of the slide. Output from a program can keep this from firing,
                 // but it redraws then anyway.
@@ -1627,6 +1640,12 @@ fn refresh_ai_title(session: &mut Session, cwd: &Path) {
     }
 }
 
+/// A turn is running. Claude titles a conversation a few seconds into a turn and retitles it when
+/// you approve a plan, often minutes before the turn ends.
+fn in_turn(session: &Session) -> bool {
+    matches!(session.state(), State::Working | State::WaitingPermission)
+}
+
 /// `text` quoted for `sh`.
 fn quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
@@ -1691,6 +1710,28 @@ mod tests {
         assert_eq!(next_waiting(&[Idle], 0), None);
         // Its background work or a scheduled wakeup goes on without you.
         assert_eq!(next_waiting(&[Working, Asleep, Idle], 2), None);
+    }
+
+    #[test]
+    fn titles_are_read_while_a_turn_runs() {
+        let mut session = Session::default();
+        let mut read = vec![in_turn(&session)];
+        for event in [
+            Bridge::Ready {
+                session_id: "5c1c".into(),
+                root: "/work".into(),
+            },
+            Bridge::Submitted,
+            Bridge::Permission,
+            Bridge::Approved,
+            Bridge::Asleep,
+            Bridge::Idle,
+        ] {
+            session.bridge(event);
+            read.push(in_turn(&session));
+        }
+        // Starting, Idle, Working, WaitingPermission, Working, Working, Asleep.
+        assert_eq!(read, [false, false, true, true, true, true, false]);
     }
 
     #[test]
