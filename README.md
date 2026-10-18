@@ -40,6 +40,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] Start a session in a directory: the interactive `claude` in a pseudo-terminal, with the ccs-bridge mod
 - [x] Track state from the mod's reports: starting, working, waiting for permission, idle, asleep on background work
 - [x] Everything else is Claude Code's own: replies, tool calls, permission dialogs, interrupts, slash commands, permission modes, plans
+- [x] New sessions start in Claude's plan mode; `plan = false` turns it off
 - [x] Resume a session (`--resume`), and past sessions from `~/.claude/projects`
 - [x] Exiting Claude closes its session and its tabs; ccs exits after the last one
 
@@ -115,9 +116,9 @@ Everything else starts with the leader, Ctrl-Space, then one key:
 | `q` | Quit. While a merge runs, it takes `q` again |
 | Ctrl-Space | Send Ctrl-Space to the program in the tab, Claude included |
 
-Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. The leader is set with `leader = "ctrl-a"` and similar. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long, and `slide_ms = 0` switches at once.
+Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. New sessions start in Claude's plan mode (`claude --permission-mode plan`); `plan = false` turns that off. The leader is set with `leader = "ctrl-a"` and similar. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long, and `slide_ms = 0` switches at once.
 
-Each session is a plain `claude` with your own settings, plugins and permission mode; ccs only adds its mods. ccs loads them from this repository's `mods`, so a ccs binary needs its source tree for now. Start ccs from your own terminal rather than from inside a Claude Code session, whose `CLAUDE_CODE_*` variables would reach the sessions.
+Each session is a plain `claude` with your own settings and plugins; ccs only adds its mods, and starts a new session in plan mode. Resumed sessions keep your own permission mode. ccs loads them from this repository's `mods`, so a ccs binary needs its source tree for now. Start ccs from your own terminal rather than from inside a Claude Code session, whose `CLAUDE_CODE_*` variables would reach the sessions.
 
 ## Merging a session
 

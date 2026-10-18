@@ -1,5 +1,5 @@
 //! `~/.config/ccs/config.toml`: the leader key, the theme, the slide between sessions, worktrees,
-//! the `[[tab]]` definitions and the `[[merge]]` actions.
+//! plan mode, the `[[tab]]` definitions and the `[[merge]]` actions.
 
 use std::path::Path;
 
@@ -41,6 +41,9 @@ pub struct Config {
     /// Each new session works in its own git worktree, which Claude makes (`claude --worktree`),
     /// and its tabs run there. Sessions outside git, or before the first commit, get none.
     pub worktree: bool,
+    /// A new session starts in Claude's plan mode (`claude --permission-mode plan`). Resumed ones,
+    /// and one opened to fix a merge's conflicts, start in your own default mode.
+    pub plan: bool,
     /// Peer tabs every session gets next to its Chat tab.
     #[serde(rename = "tab")]
     pub tabs: Vec<TabDef>,
@@ -104,6 +107,7 @@ impl Default for Config {
             theme: None,
             slide_ms: 150,
             worktree: true,
+            plan: true,
             tabs: vec![
                 TabDef {
                     name: "review".into(),
@@ -182,6 +186,7 @@ mod tests {
         assert_eq!(names, ["review", "shell", "git"]);
         assert_eq!(config.slide_ms, 150);
         assert!(config.worktree);
+        assert!(config.plan);
         // It shows the default action as it is.
         assert_eq!(config.merges, Config::default().merges);
     }
@@ -198,6 +203,8 @@ mod tests {
         assert_eq!(Config::parse("slide_ms = 0").unwrap().slide_ms, 0);
         assert!(config.worktree);
         assert!(!Config::parse("worktree = false").unwrap().worktree);
+        assert!(config.plan);
+        assert!(!Config::parse("plan = false").unwrap().plan);
     }
 
     #[test]
