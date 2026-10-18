@@ -47,6 +47,11 @@ slide_ms = 150
 # git, or before the first commit, get none.
 worktree = true
 
+# A new session starts in Claude's plan mode (`claude --permission-mode plan`): Claude plans and
+# asks you to approve the plan before it changes anything. Shift+Tab changes the mode as usual.
+# Resumed sessions, and one opened to fix a merge's conflicts, start in your own default mode.
+plan = true
+
 [[tab]]
 name = "review"
 key = "r"

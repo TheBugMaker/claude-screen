@@ -589,7 +589,7 @@ impl App {
 
     /// Starts Claude in `cwd`, resuming `resume`, or in a new worktree `worktree`, with the
     /// bridge mod reporting as session `key`, on `prompt` if given. Its terminal's events come
-    /// with `key` too.
+    /// with `key` too. A new session without a prompt starts in plan mode, if the config wants it.
     fn spawn_claude(
         &self,
         key: u64,
@@ -616,6 +616,11 @@ impl App {
         if !settings.is_empty() {
             let settings = serde_json::Value::Object(settings).to_string();
             args.extend(["--settings".into(), quoted(&settings)]);
+        }
+        // A new session starts by planning. Not a resumed one, nor one Claude starts on a prompt:
+        // that is a merge's conflicts, for it to fix on its own.
+        if self.config.plan && resume.is_none() && prompt.is_none() {
+            args.extend(["--permission-mode".into(), "plan".into()]);
         }
         if let Some(id) = resume {
             args.extend(["--resume".into(), quoted(id)]);
