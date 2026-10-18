@@ -6,8 +6,11 @@ import type { EngineInterface, Register } from 'claude-code'
 type Report =
   | { ev: 'ready'; session_id: string; root: string }
   | { ev: 'submitted' | 'working' | 'permission' | 'approved' | 'denied' | 'asleep' | 'idle' }
-  | { ev: 'title'; title: string }
+  | { ev: 'title' | 'guess'; title: string }
   | { ev: 'root'; root: string }
+
+/** How much of a `/plan` prompt Haiku titles: the task, not a file pasted after it. */
+const TITLED_CHARS = 120
 
 /** Tool calls put to the mode's decider and not settled yet, oldest first. */
 const asked: string[] = []
@@ -28,6 +31,21 @@ async function send($: EngineInterface, event: Report) {
   const session = await $.env.get('CCS_SESSION')
   if (exe === undefined || socket === undefined || session === undefined) return
   await $.process.run([exe, 'hook', socket, session], { stdin: JSON.stringify(event) })
+}
+
+/** Has Haiku title the task in `prompt`, for ccs to show until Claude titles the session. */
+async function guess($: EngineInterface, prompt: string) {
+  const reply = await $.model.complete({
+    model: 'haiku',
+    system:
+      'Reply with a title of two to six words for the task below, in sentence case, with no quotes and no final period.',
+    prompt,
+    effort: 'low',
+    maxTokens: 30,
+    timeoutMs: 15_000,
+  })
+  const title = reply.isAnswered ? reply.text.trim().split('\n')[0] : undefined
+  if (title) report($, { ev: 'guess', title })
 }
 
 /** Call `id` is settled: if its dialog was shown, it was answered yes or no. */
@@ -111,6 +129,14 @@ export const register: Register = on => {
     const result = await next(e)
     const title = e.args.trim()
     if (title !== '') report($, { ev: 'title', title })
+    return result
+  })
+  // Claude titles a session started with `/plan <prompt>` only once the plan is approved. The
+  // guess is made on a timer, so the plan doesn't wait for it and it outlives this command.
+  on('command.run', { command: 'plan' }, async ($, e, next) => {
+    const result = await next(e)
+    const prompt = [...e.args.trim()].slice(0, TITLED_CHARS).join('')
+    if (prompt !== '') $.clock.after(0, () => void guess($, prompt).catch(() => undefined))
     return result
   })
 }

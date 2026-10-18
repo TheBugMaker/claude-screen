@@ -138,3 +138,32 @@ test('ready says where the session works, and a tool call that moves it reports 
     { ev: 'root', root: '/work' },
   ])
 })
+
+test('/plan has Haiku title the start of its prompt, and reports the guess', async ($, on) => {
+  on('command.run', () => ({}))
+  mock.env(on, ENV)
+  const asked: unknown[] = []
+  on('model.complete', ($, e) => {
+    asked.push({ model: e.model, prompt: e.prompt })
+    const usage = { input_tokens: 40, output_tokens: 6, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    return { value: { isAnswered: true, text: 'Rate limiting for the API\n', usage } }
+  })
+  const sent: unknown[] = []
+  on('process.run', ($, e) => {
+    sent.push(JSON.parse(e.init?.stdin ?? 'null'))
+    return RAN
+  })
+  const clock = mock.clock(on)
+
+  const typed = { origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } } as const
+  // A file pasted after the task is not sent.
+  const task = 'Add rate limiting to the API, per key, with the limits from config.toml: '
+  const file = 'x'.repeat(5000)
+  await $.command.run({ ...typed, command: 'plan', args: `  ${task}${file}` })
+  // Nothing to title.
+  await $.command.run({ ...typed, command: 'plan', args: '' })
+  await clock.settle()
+
+  expect(asked).toEqual([{ model: 'haiku', prompt: (task + file).slice(0, 120) }])
+  expect(sent).toEqual([{ ev: 'guess', title: 'Rate limiting for the API' }])
+})

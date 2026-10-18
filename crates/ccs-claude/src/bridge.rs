@@ -29,6 +29,9 @@ pub enum Bridge {
     Idle,
     /// The session was named with `/rename`.
     Title { title: String },
+    /// A title Haiku made from a `/plan` prompt, as Claude makes its own only once the plan is
+    /// approved.
+    Guess { title: String },
     /// Claude moved to another directory, as into or out of a worktree.
     Root { root: PathBuf },
 }
@@ -53,6 +56,12 @@ mod tests {
             parse(r#"{"ev":"title","title":"probe"}"#),
             Bridge::Title {
                 title: "probe".into()
+            }
+        );
+        assert_eq!(
+            parse(r#"{"ev":"guess","title":"Rate limiting"}"#),
+            Bridge::Guess {
+                title: "Rate limiting".into()
             }
         );
         assert_eq!(
