@@ -19,7 +19,9 @@ ccs-term = { path = "crates/ccs-term" }
 # TUI
 ratatui = "0.30.2"
 frizbee = "0.13.0"
-crossterm = { version = "0.29.0", features = ["event-stream"] }
+# use-dev-tty: input through poll(2). The default mio source is edge-triggered and reads 1 KB per
+# wakeup, so a burst over 1 KB (a scroll fling, a paste) leaves input unread until the next key.
+crossterm = { version = "0.29.0", features = ["event-stream", "use-dev-tty"] }
 tui-term = "0.3.4"
 vt100 = "0.16.2"
 portable-pty = "0.9.0"
