@@ -1205,9 +1205,15 @@ impl App {
         match view.session.state() {
             State::Idle => {}
             State::Starting => return Err("Claude is still starting: merge once it's ready".into()),
-            // Background work too: the merge closes the session, which would stop it.
-            State::Working | State::WaitingPermission | State::Asleep => {
+            State::Working | State::WaitingPermission => {
                 return Err("Claude is working: merge when it's done".into());
+            }
+            // The merge closes the session, which would stop its background work.
+            State::Asleep => {
+                return Err(
+                    "Claude is waiting on background work or a wakeup: stop it before merging"
+                        .into(),
+                );
             }
         }
         // They would get in each other's way in the main checkout.
@@ -2496,7 +2502,10 @@ mod tests {
         app.views[0].session.bridge(Bridge::Asleep);
         app.views[0].session.bridge(Bridge::Idle);
         assert_eq!(app.views[0].session.state(), State::Asleep);
-        assert_eq!(refused(&mut app), "Claude is working: merge when it's done");
+        assert_eq!(
+            refused(&mut app),
+            "Claude is waiting on background work or a wakeup: stop it before merging"
+        );
         app.views[0].session.bridge(Bridge::Submitted);
         app.views[0].session.bridge(Bridge::Idle);
         leader_key(&mut app, KeyCode::Char('m'));
