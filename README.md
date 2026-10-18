@@ -97,6 +97,7 @@ ccs --resume <SESSION_ID> # resume a past Claude Code session in its directory
 | Enter (in a tab whose command exited) | Run it again |
 | Mouse wheel | Scroll Claude's transcript, or a terminal tab's output |
 | Click a session or a tab | Go to it |
+| Scroll sideways (touchpad swipe) | Go to the previous / next session, one per swipe |
 
 Everything else starts with the leader, Ctrl-Space, then one key:
 
