@@ -8,7 +8,7 @@ expression: terminal.backend()
 "      │› user                                        │      "
 "      │›  1 ● Fix the login bug                      │      "
 "      │        › the login form rejects valid user na│      "
-"      │     · Add rate limiting · 3h ago             │      "
+"      │     · Add rate limiting · 3h ago · merged    │      "
 "      │        › limit requests per user             │      "
 "      │                                              │      "
 "      ╰ ↑↓ select · Enter go · ⇧Tab open/all · Esc ca╯      "

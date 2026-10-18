@@ -9,7 +9,11 @@ use ccs_claude::{
 use frizbee::{Config, Matcher};
 use ratatui::widgets::ListState;
 
-use crate::{app::View, git, input::Input};
+use crate::{
+    app::{View, worktree_name},
+    git,
+    input::Input,
+};
 
 /// Characters of each prompt that are searched and shown. Pasted prompts can be very long.
 const PROMPT_CHARS: usize = 300;
@@ -36,6 +40,9 @@ pub struct Finder {
 pub struct OldSession {
     pub past: PastSession,
     pub prompts: Vec<String>,
+    /// For a session in a worktree: whether its branch is merged into the one the main checkout
+    /// is on (`true`), or has commits that one doesn't (`false`). `None` when neither is known.
+    pub merged: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +120,15 @@ pub fn scan(cwd: &Path) -> Result<Vec<OldSession>, String> {
     let top = git::toplevel(cwd).unwrap_or_else(|| cwd.to_owned());
     let repo = history::worktree_repo(&top).unwrap_or(&top);
     let sessions = history::list_sessions(&dir, cwd, repo).map_err(|e| e.to_string())?;
+    // Without them, the sessions are listed with no word on their branches.
+    let (merged, not_in) = git::branch(repo)
+        .map(|target| {
+            (
+                git::merged_into(repo, &target).unwrap_or_default(),
+                git::not_in(repo, &target).unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
     Ok(sessions
         .into_iter()
         .map(|past| {
@@ -121,9 +137,35 @@ pub fn scan(cwd: &Path) -> Result<Vec<OldSession>, String> {
                 .iter()
                 .map(|p| clip(p))
                 .collect();
-            OldSession { past, prompts }
+            let merged = past.cwd.as_deref().and_then(|cwd| {
+                let name = worktree_name(cwd)?;
+                // Claude names the branch after the worktree, but one it adopted can be on any.
+                let branch = cwd
+                    .is_dir()
+                    .then(|| git::branch(cwd))
+                    .flatten()
+                    .unwrap_or_else(|| format!("worktree-{name}"));
+                state(&branch, &merged, &not_in)
+            });
+            OldSession {
+                past,
+                prompts,
+                merged,
+            }
         })
         .collect())
+}
+
+/// Whether `branch` is merged: `false` while it has commits the target doesn't (`not_in`), even
+/// after an earlier merge, else `true` once the target's reflog has it merged in (`merged`).
+fn state(branch: &str, merged: &[String], not_in: &[String]) -> Option<bool> {
+    if not_in.iter().any(|b| b == branch) {
+        Some(false)
+    } else if merged.iter().any(|b| b == branch) {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 fn open(views: &[View]) -> Vec<(&Session, &Path)> {
@@ -304,6 +346,7 @@ mod tests {
                 modified: std::time::SystemTime::UNIX_EPOCH,
             },
             prompts: Vec::new(),
+            merged: None,
         };
         let mut resumed = Session::default();
         resumed.session_id = Some("a".into());
@@ -330,5 +373,17 @@ mod tests {
         );
         // Its prompts come from there too.
         assert_eq!(items[0].prompts, ["fix the login bug"]);
+    }
+
+    #[test]
+    fn work_not_in_the_target_is_not_merged() {
+        let merged = ["worktree-a".to_owned(), "worktree-b".to_owned()];
+        let not_in = ["worktree-b".to_owned(), "worktree-c".to_owned()];
+        assert_eq!(state("worktree-a", &merged, &not_in), Some(true));
+        // Merged once, then more work.
+        assert_eq!(state("worktree-b", &merged, &not_in), Some(false));
+        assert_eq!(state("worktree-c", &merged, &not_in), Some(false));
+        // Gone with no trace, or nothing of its own.
+        assert_eq!(state("worktree-d", &merged, &not_in), None);
     }
 }
