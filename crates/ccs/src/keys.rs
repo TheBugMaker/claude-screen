@@ -1,67 +1,94 @@
-//! Keys named in the config, like the leader `ctrl-space`.
+//! The keys of the config (`ccs_core::keys`), as crossterm reports them.
 
+use ccs_core::keys::{self, Key};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyMatch {
-    code: KeyCode,
-    modifiers: KeyModifiers,
+/// Whether `pressed` is `key`. Shift is in the character's case: crossterm sends Alt+Shift+N as `n`
+/// with Shift under the kitty protocol, and as `N` otherwise.
+pub fn matches(key: Key, pressed: &KeyEvent) -> bool {
+    let mut code = pressed.code;
+    let mut modifiers = pressed.modifiers;
+    if let KeyCode::Char(c) = code
+        && modifiers.contains(KeyModifiers::SHIFT)
+    {
+        code = KeyCode::Char(c.to_ascii_uppercase());
+        modifiers.remove(KeyModifiers::SHIFT);
+    }
+    let wanted = event(key);
+    code == wanted.code && modifiers == wanted.modifiers
 }
 
-impl KeyMatch {
-    /// Parses `ctrl-space`, `ctrl-a`, `alt-x`: modifiers (`ctrl`, `alt`, `shift`) joined to a
-    /// key (`space` or one character) by `-`.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let (modifier_names, key) = text.rsplit_once('-').unwrap_or(("", text));
-        let mut modifiers = KeyModifiers::NONE;
-        for name in modifier_names.split('-').filter(|n| !n.is_empty()) {
-            modifiers |= match name {
-                "ctrl" => KeyModifiers::CONTROL,
-                "alt" => KeyModifiers::ALT,
-                "shift" => KeyModifiers::SHIFT,
-                other => return Err(format!("unknown modifier {other:?} in {text:?}")),
-            };
-        }
-        let mut chars = key.chars();
-        let code = match (key, chars.next(), chars.next()) {
-            ("space", _, _) => KeyCode::Char(' '),
-            (_, Some(c), None) => KeyCode::Char(c.to_ascii_lowercase()),
-            _ => return Err(format!("unknown key {key:?} in {text:?}")),
-        };
-        Ok(Self { code, modifiers })
-    }
-
-    pub fn matches(&self, key: &KeyEvent) -> bool {
-        let code = match key.code {
-            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
-            code => code,
-        };
-        code == self.code && key.modifiers == self.modifiers
-    }
-
-    /// The key press itself, to pass it on to a program.
-    pub fn event(self) -> KeyEvent {
-        KeyEvent::new(self.code, self.modifiers)
-    }
+/// The key press itself, to pass it on to a program.
+pub fn event(key: Key) -> KeyEvent {
+    let code = match key.code {
+        keys::KeyCode::Char(c) => KeyCode::Char(c),
+        keys::KeyCode::Enter => KeyCode::Enter,
+    };
+    let mut modifiers = KeyModifiers::NONE;
+    modifiers.set(KeyModifiers::CONTROL, key.ctrl);
+    modifiers.set(KeyModifiers::ALT, key.alt);
+    KeyEvent::new(code, modifiers)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
     #[test]
-    fn parses_and_matches_keys() {
-        let leader = KeyMatch::parse("ctrl-space").unwrap();
-        assert!(leader.matches(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
-        assert!(!leader.matches(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    fn matches_keys_as_terminals_send_them() {
+        let key = |text| Key::parse(text).unwrap();
+        let ctrl_space = press(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(matches(key("<C-Space>"), &ctrl_space));
+        assert!(!matches(
+            key("<C-Space>"),
+            &press(KeyCode::Char(' '), KeyModifiers::NONE)
+        ));
+        assert_eq!(event(key("<C-Space>")), ctrl_space);
 
-        let leader = KeyMatch::parse("ctrl-a").unwrap();
-        assert!(leader.matches(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
-        assert_eq!(leader.event().code, KeyCode::Char('a'));
+        assert!(matches(
+            key("<C-n>"),
+            &press(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        ));
+        assert!(matches(
+            key("<CR>"),
+            &press(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert!(matches(
+            key("<A-1>"),
+            &press(KeyCode::Char('1'), KeyModifiers::ALT)
+        ));
+        assert!(!matches(
+            key("<A-1>"),
+            &press(KeyCode::Char('1'), KeyModifiers::CONTROL)
+        ));
 
-        assert!(KeyMatch::parse("alt-x").is_ok());
-        assert!(KeyMatch::parse("hyper-x").is_err());
-        assert!(KeyMatch::parse("ctrl-escape").is_err());
-        assert!(KeyMatch::parse("").is_err());
+        // Shift: as the character's case, or as a modifier.
+        let shift = KeyModifiers::SHIFT;
+        assert!(matches(key("N"), &press(KeyCode::Char('N'), shift)));
+        assert!(matches(
+            key("N"),
+            &press(KeyCode::Char('N'), KeyModifiers::NONE)
+        ));
+        assert!(!matches(key("n"), &press(KeyCode::Char('N'), shift)));
+        assert!(!matches(
+            key("N"),
+            &press(KeyCode::Char('n'), KeyModifiers::NONE)
+        ));
+        assert!(matches(
+            key("<A-N>"),
+            &press(KeyCode::Char('n'), KeyModifiers::ALT | shift)
+        ));
+        assert!(matches(
+            key("<A-N>"),
+            &press(KeyCode::Char('N'), KeyModifiers::ALT | shift)
+        ));
+        assert!(!matches(
+            key("<A-n>"),
+            &press(KeyCode::Char('n'), KeyModifiers::ALT | shift)
+        ));
     }
 }

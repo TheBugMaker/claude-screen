@@ -68,6 +68,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] Tab modes: `eager`, `lazy`, `regular`
 - [ ] Tab modes: `on_demand`, `on_change` (re-run when Claude edits files), `on_idle`
 - [x] Leader key, then `c` / the tab's own key / `[` `]` to switch tabs
+- [x] Every key in the config, written as vim writes them: after the leader (`<leader>f`) or on its own with Ctrl or Alt (`<C-f>`, `<A-1>`), several for one action
 - [x] Resize tabs with the window, including hidden ones
 - [x] Review tab: runs a preconfigured command, by default `git diff`
 - [x] Terminal tab: opens a shell in the project directory, by default `$SHELL`, configurable
@@ -100,7 +101,7 @@ ccs --resume <SESSION_ID> # resume a past Claude Code session in its directory
 | Click a session or a tab | Go to it |
 | Scroll sideways (touchpad swipe), or Shift+scroll | Go to the previous / next session, one per swipe |
 
-Everything else starts with the leader, Ctrl-Space, then one key:
+Everything else starts with the leader, Ctrl-Space, then one key. These are the defaults: the config changes any of them, and can give each a Ctrl or Alt key that works without the leader (see below).
 
 | Leader, then | Action |
 |---|---|
@@ -117,7 +118,7 @@ Everything else starts with the leader, Ctrl-Space, then one key:
 | `q` | Quit. While a merge runs, it takes `q` again |
 | Ctrl-Space | Send Ctrl-Space to the program in the tab, Claude included |
 
-Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. New sessions start in Claude's plan mode (`claude --permission-mode plan`); `plan = false` turns that off. The leader is set with `leader = "ctrl-a"` and similar. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long it takes per 100 columns, so every width slides at the same speed, and `slide_ms = 0` switches at once.
+Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. New sessions start in Claude's plan mode (`claude --permission-mode plan`); `plan = false` turns that off. Keys are written as vim writes them, starting with the leader: `leader = "<C-a>"`. Under `[keys]`, each action (`find`, `quit`, `session_1`, … all listed in the example) takes one key or a list of them, after the leader (`"<leader>f"`) or on its own with Ctrl or Alt (`"<C-f>"`, `"<A-1>"`); a tab's `key` takes the same. A key without the leader goes to ccs rather than to Claude or the program in the tab, so `session_1 = ["<leader>1", "<A-1>"]` keeps the leader's way and adds Alt-1. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long it takes per 100 columns, so every width slides at the same speed, and `slide_ms = 0` switches at once.
 
 Each session is a plain `claude` with your own settings and plugins; ccs only adds its mods, and starts a new session in plan mode. Resumed sessions keep your own permission mode. ccs loads them from this repository's `mods`, so a ccs binary needs its source tree for now. Start ccs from your own terminal rather than from inside a Claude Code session, whose `CLAUDE_CODE_*` variables would reach the sessions.
 

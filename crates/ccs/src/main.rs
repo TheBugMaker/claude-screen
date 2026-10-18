@@ -17,7 +17,7 @@ use std::io::stdout;
 
 use ccs_core::{config::Config, paths};
 use clap::Parser;
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::WrapErr;
 use crossterm::{
     event::{
         DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
@@ -31,7 +31,6 @@ use tokio::sync::mpsc;
 use crate::{
     app::App,
     cli::{Cli, Command},
-    keys::KeyMatch,
 };
 
 #[tokio::main]
@@ -51,8 +50,6 @@ async fn main() -> color_eyre::Result<()> {
     let config_path = config_dir.join("config.toml");
     let config = Config::load(&config_path)
         .wrap_err_with(|| format!("loading {}", config_path.display()))?;
-    let leader = KeyMatch::parse(&config.leader)
-        .map_err(|err| eyre!("{}: leader: {err}", config_path.display()))?;
     let claude_theme = match &config.theme {
         Some(name) => {
             let (colors, text) = theme::load(name, &config_dir.join("themes"))
@@ -71,14 +68,7 @@ async fn main() -> color_eyre::Result<()> {
     let socket_path = paths::socket_path()?;
     let socket = socket::listen(socket_path.clone(), reports)
         .wrap_err_with(|| format!("listening on {}", socket_path.display()))?;
-    let mut app = App::new(
-        config,
-        leader,
-        scans,
-        ptys,
-        socket.path().to_owned(),
-        claude_theme,
-    );
+    let mut app = App::new(config, scans, ptys, socket.path().to_owned(), claude_theme);
     match &cli.resume {
         Some(id) => app.resume(id)?,
         None => app.open(&cli.dir, None, true)?,
