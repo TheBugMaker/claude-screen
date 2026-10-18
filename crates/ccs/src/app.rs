@@ -1113,7 +1113,7 @@ fn urgency(state: State) -> Option<u8> {
         State::WaitingPermission => Some(0),
         State::Idle => Some(1),
         State::Starting => Some(2),
-        State::Working => None,
+        State::Working | State::Asleep => None,
     }
 }
 
@@ -1129,7 +1129,7 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use ccs_claude::session::State::{Idle, Starting, WaitingPermission, Working};
+    use ccs_claude::session::State::{Asleep, Idle, Starting, WaitingPermission, Working};
     use crossterm::event::MouseEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1153,6 +1153,8 @@ mod tests {
     fn busy_and_current_sessions_are_not_waiting() {
         assert_eq!(next_waiting(&[Working, Working, Working], 0), None);
         assert_eq!(next_waiting(&[Idle], 0), None);
+        // Its background work or a scheduled wakeup goes on without you.
+        assert_eq!(next_waiting(&[Working, Asleep, Idle], 2), None);
     }
 
     #[test]

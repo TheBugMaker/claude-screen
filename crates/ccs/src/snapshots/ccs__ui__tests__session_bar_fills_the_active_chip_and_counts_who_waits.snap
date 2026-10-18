@@ -2,4 +2,4 @@
 source: crates/ccs/src/ui.rs
 expression: terminal.backend()
 ---
-" 1 ○ claude-screen   2 ● auth-refactor   3 ◆ api   4 ○ w  ◆ 1 waiting  ○ 2 idle "
+" 1 ◐ claude-screen   2 ● auth-refactor   3 ◆ api   4 ○ w  ◆ 1 waiting  ○ 1 idle "

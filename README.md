@@ -10,7 +10,7 @@ You type a prompt, submit it, and `ccs` moves you to the next session that is wa
 
 ```
 ccs (ratatui)
-├── Session panel           working / waiting / idle, sorted by what needs you
+├── Session panel           working / waiting / idle / asleep, sorted by what needs you
 └── Session "auth-refactor" [1 Chat] [2 diff] [3 shell] [4 review]
     ├── Chat tab   → the interactive `claude --plugin-dir mods`, in a pseudo-terminal
     │                the ccs-bridge mod reports what it does: `ccs hook` → Unix socket → ccs
@@ -18,7 +18,7 @@ ccs (ratatui)
                      portable-pty → vt100 (in-memory screen) → tui-term widget
 ```
 
-Claude Code draws its own screen in the Chat tab, so all of its features work as usual. The ccs-bridge mod (`mods/ccs-bridge`) tells ccs when a session is ready, works, shows a permission dialog, is answered and goes idle, and when it is renamed. The ccs-traces mod (`mods/ccs-traces`) draws each run of tool calls (the calls Claude makes between two of its texts) as one line, `● 5 tool calls · Read 3 · Bash 2`: click it to list the calls, and click a call to see its whole input and output. It draws only in Claude's fullscreen mode (`"tui": "fullscreen"`), the one that takes clicks. Mods are an early-access Claude Code feature (2.1.301 and later), and their API can change between releases.
+Claude Code draws its own screen in the Chat tab, so all of its features work as usual. The ccs-bridge mod (`mods/ccs-bridge`) tells ccs when a session is ready, works, shows a permission dialog, is answered and goes idle, when it waits on background work or a scheduled wakeup to go on (asleep, ◐, which submit-and-advance skips like a working one), and when it is renamed. The ccs-traces mod (`mods/ccs-traces`) draws each run of tool calls (the calls Claude makes between two of its texts) as one line, `● 5 tool calls · Read 3 · Bash 2`: click it to list the calls, and click a call to see its whole input and output. It draws only in Claude's fullscreen mode (`"tui": "fullscreen"`), the one that takes clicks. Mods are an early-access Claude Code feature (2.1.301 and later), and their API can change between releases.
 
 | Directory | Role |
 |---|---|
@@ -38,7 +38,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 
 ### M1: Claude sessions
 - [x] Start a session in a directory: the interactive `claude` in a pseudo-terminal, with the ccs-bridge mod
-- [x] Track state from the mod's reports: starting, working, waiting for permission, idle
+- [x] Track state from the mod's reports: starting, working, waiting for permission, idle, asleep on background work
 - [x] Everything else is Claude Code's own: replies, tool calls, permission dialogs, interrupts, slash commands, permission modes, plans
 - [x] Resume a session (`--resume`), and past sessions from `~/.claude/projects`
 - [x] Exiting Claude closes its session and its tabs; ccs exits after the last one
@@ -137,7 +137,7 @@ A theme is a [Claude Code theme file](themes/gruvbox-dark.json) with a `ccs` sec
   | `onAccent` | Text on `accent` | `inverseText` |
   | `dim` | Rules, borders, hints | `inactive` |
   | `selection` | The session picked in the finder | `userMessageBackground` |
-  | `starting`, `idle`, `working`, `waiting` | The state of each session: ◌ ○ ● ◆ | `inactive`, `success`, `warning`, `permission` |
+  | `starting`, `idle`, `asleep`, `working`, `waiting` | The state of each session: ◌ ○ ◐ ● ◆ | `inactive`, `success`, `warning`, `warning`, `permission` |
   | `error` | Notices, and what failed | `error` |
   | `warning` | A tab whose command exited | `warning` |
   | `leaderPending` | The leader hint, while the leader waits for a key | `suggestion` |

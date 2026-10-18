@@ -403,6 +403,7 @@ fn state_glyph(state: State) -> (&'static str, Color) {
     match state {
         State::Starting => ("◌", theme.starting),
         State::Idle => ("○", theme.idle),
+        State::Asleep => ("◐", theme.asleep),
         State::Working => ("●", theme.working),
         State::WaitingPermission => ("◆", theme.waiting),
     }
@@ -602,7 +603,7 @@ mod tests {
     #[test]
     fn session_bar_fills_the_active_chip_and_counts_who_waits() {
         let sessions = [
-            ("claude-screen".to_owned(), State::Idle),
+            ("claude-screen".to_owned(), State::Asleep),
             ("auth-refactor".to_owned(), State::Working),
             ("api".to_owned(), State::WaitingPermission),
             ("web".to_owned(), State::Idle),
@@ -616,7 +617,7 @@ mod tests {
         assert_eq!(
             texts(&terminal, &chips),
             [
-                " 1 ○ claude-screen ",
+                " 1 ◐ claude-screen ",
                 " 2 ● auth-refactor ",
                 " 3 ◆ api ",
                 " 4 ○ w"
@@ -626,7 +627,7 @@ mod tests {
         let terminal = draw(30, 1, |frame| {
             chips = render_session_bar(frame, frame.area(), &sessions, 1);
         });
-        assert_eq!(texts(&terminal, &chips), [" 1 ○ c", "", "", ""]);
+        assert_eq!(texts(&terminal, &chips), [" 1 ◐ c", "", "", ""]);
     }
 
     /// The text drawn in each of `areas`.

@@ -22,6 +22,9 @@ pub enum Bridge {
     Approved,
     /// The dialog was answered no.
     Denied,
+    /// The turn is ending, but work Claude started in the background, or a scheduled wakeup,
+    /// will start its next one. `Idle` follows.
+    Asleep,
     /// The turn ended, answered or interrupted.
     Idle,
     /// The session was named with `/rename`.
@@ -45,6 +48,7 @@ mod tests {
             }
         );
         assert_eq!(parse(r#"{"ev":"approved"}"#), Bridge::Approved);
+        assert_eq!(parse(r#"{"ev":"asleep"}"#), Bridge::Asleep);
         assert_eq!(
             parse(r#"{"ev":"title","title":"probe"}"#),
             Bridge::Title {

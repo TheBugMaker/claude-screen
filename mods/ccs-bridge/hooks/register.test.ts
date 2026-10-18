@@ -9,6 +9,7 @@ const RAN = {
 /** The engine beneath the mod, for the events these tests raise. */
 function engine(on: On) {
   on('classic.PermissionRequest', () => ({}))
+  on('classic.Stop', () => ({}))
   on('turn.complete', () => ({ text: '' }))
 }
 /** What ccs gives the Claude it starts. */
@@ -44,6 +45,52 @@ test('a dialog, then an interrupt, reports permission then idle to ccs', async (
     { argv, report: { ev: 'permission' } },
     { argv, report: { ev: 'idle' } },
   ])
+})
+
+test('a turn that leaves background work or a wakeup behind reports asleep, then idle', async ($, on) => {
+  engine(on)
+  mock.env(on, ENV)
+  const sent: unknown[] = []
+  on('process.run', ($, e) => {
+    sent.push(JSON.parse(e.init?.stdin ?? 'null'))
+    return RAN
+  })
+  const clock = mock.clock(on)
+  const end = { answer: 'ok', durationMs: 10, isAborted: false, reason: 'answer' } as const
+  const shell = { id: 'b1', type: 'shell', status: 'running', description: 'Sleep', command: 'sleep 20' }
+  const cron = { id: 'c1', schedule: '10 9 18 10 *', recurring: false, prompt: 'tick' }
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [shell], session_crons: [] })
+  await $.turn.complete({ ...end, turnId: 'turn-1' })
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [cron] })
+  await $.turn.complete({ ...end, turnId: 'turn-2' })
+  // Nothing left to wake it.
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [] })
+  await $.turn.complete({ ...end, turnId: 'turn-3' })
+  await clock.settle()
+
+  expect(sent).toEqual([
+    { ev: 'asleep' },
+    { ev: 'idle' },
+    { ev: 'asleep' },
+    { ev: 'idle' },
+    { ev: 'idle' },
+  ])
+})
+
+test('a stop that a hook blocks reports nothing', async ($, on) => {
+  on('classic.Stop', () => ({ block: 'keep going' }))
+  mock.env(on, ENV)
+  let runs = 0
+  on('process.run', () => {
+    runs += 1
+    return RAN
+  })
+  const clock = mock.clock(on)
+  const shell = { id: 'b1', type: 'shell', status: 'running', description: 'Sleep', command: 'sleep 20' }
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [shell], session_crons: [] })
+  await clock.settle()
+  expect(runs).toBe(0)
 })
 
 test('without ccs it reports nothing', async ($, on) => {
