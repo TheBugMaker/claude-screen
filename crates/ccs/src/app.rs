@@ -1434,8 +1434,9 @@ impl App {
     }
 
     /// The work of session `index` is in its target. The session closes, and its worktree goes
-    /// if nothing in it would be lost, even if the session is named. After the last session, a
-    /// new one opens where it started. Not while Claude is busy, which closing would stop.
+    /// if nothing in it would be lost, even if the session is named. If you were on it, you go on
+    /// as after a prompt you submit, to a new session if none waits. Not while Claude is busy,
+    /// which closing would stop.
     fn merged(&mut self, index: usize) {
         let view = &mut self.views[index];
         let name = ui::session_name(view);
@@ -1475,9 +1476,14 @@ impl App {
         self.inform(format!("merged {name} into {target}"));
     }
 
-    /// Takes session `index` away, and keeps the one on screen, or the next if it was that one.
-    /// Dropping it ends its programs.
+    /// Takes session `index` away, as a merge closed it. If it was on screen, you go on as after a
+    /// prompt you submit: to the session that needs you most, or a new one. Dropping it ends its
+    /// programs.
     fn drop_view(&mut self, index: usize) -> View {
+        // While it is still there: the session after it is one to go to.
+        if self.active == index {
+            self.advance();
+        }
         let view = self.views.remove(index);
         if !self.views.is_empty() {
             self.active = active_after_close(self.active, index, self.views.len());
@@ -2623,6 +2629,37 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_moves_you_on_as_a_submitted_prompt_does() {
+        // Past the busy session beside it, to one that waits; with none waiting, to a new one.
+        for waits in [true, false] {
+            let (repo, tree) = merge_repo(if waits { "on-waits" } else { "on-new" });
+            let (mut app, mut events) = app_with_ptys();
+            app.views.push(ready_view(0, &repo, &tree));
+            let mut busy = ready_view(1, &repo, &repo);
+            busy.session.bridge(Bridge::Submitted);
+            app.views.push(busy);
+            if waits {
+                app.views.push(ready_view(2, &repo, &repo));
+            } else {
+                // Still starting, so no other spare starts.
+                app.spare = Some(view(2, repo.clone()));
+            }
+            std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+            leader_key(&mut app, KeyCode::Char('m'));
+            modal_keys(&mut app, "Add b");
+            merge(&mut app, &mut events);
+            assert_eq!(keys(&app), [1, 2]);
+            let view = &app.views[app.active];
+            assert_eq!(view.key, 2);
+            assert_eq!(view.tab, 0);
+            for cleanup in app.cleanups.drain(..) {
+                cleanup.join().unwrap();
+            }
+            std::fs::remove_dir_all(&repo).unwrap();
+        }
+    }
+
+    #[test]
     fn leader_m_waits_for_claude_and_for_something_to_merge() {
         let (repo, tree) = merge_repo("refuse");
         let mut app = app();
@@ -2756,6 +2793,10 @@ mod tests {
     #[test]
     fn a_merge_session_is_reviewed_then_finished_with_leader_m() {
         let (mut app, mut events, repo, tree) = conflict_in_main("finish");
+        // Busy, right after the merge session.
+        let mut busy = ready_view(3, &repo, &repo);
+        busy.session.bridge(Bridge::Submitted);
+        app.views.push(busy);
         // Fixing: you go on to a session that waits, not to the one merged.
         app.views[2].session.bridge(Bridge::Submitted);
         app.advance();
@@ -2786,8 +2827,10 @@ mod tests {
         assert_eq!(panel.changes, ["MM a.txt"]);
         assert_eq!(panel.commit_message(), None);
         merge(&mut app, &mut events);
-        // Both sessions closed, the worktree went, and the finder sees the branch merged.
-        assert_eq!(keys(&app), [0]);
+        // Both sessions closed, the worktree went, and the finder sees the branch merged. You go
+        // on to the session that waits, past the busy one.
+        assert_eq!(keys(&app), [0, 3]);
+        assert_eq!(app.views[app.active].key, 0);
         assert_eq!(app.notice.as_deref(), Some("merged new into main"));
         assert_eq!(run_git(&repo, &["show", "HEAD:a.txt"]), "both, reviewed");
         assert_eq!(run_git(&repo, &["status", "--porcelain"]), "");
