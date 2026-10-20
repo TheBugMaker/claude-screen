@@ -1,0 +1,6 @@
+{
+  "name": "ccs",
+  "version": "0.1.0",
+  "description": "Tells the Claude in a claude-screen (ccs) session how ccs works, so it can explain it to the user",
+  "author": { "name": "Ghassen" }
+}

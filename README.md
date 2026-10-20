@@ -18,7 +18,7 @@ ccs (ratatui)
                      portable-pty → vt100 (in-memory screen) → tui-term widget
 ```
 
-Claude Code draws its own screen in the Chat tab, so all of its features work as usual. The ccs-bridge mod (`mods/ccs-bridge`) tells ccs when a session is ready, works, shows a permission dialog, is answered and goes idle, when it waits on background work or a scheduled wakeup to go on (asleep, ◐, which submit-and-advance skips like a working one), and when it is renamed. Claude titles a session started with `/plan <prompt>` only once the plan is approved, so until then the mod has Haiku title it from the prompt's first 120 characters. The ccs-traces mod (`mods/ccs-traces`) draws each run of tool calls (the calls Claude makes between two of its texts) as one line, `● 5 tool calls · Read 3 · Bash 2`: click it to list the calls, click a call to see its whole input and output, and click it, or anything it shows, again to fold it. It draws only in Claude's fullscreen mode (`"tui": "fullscreen"`), the one that takes clicks. Mods are an early-access Claude Code feature (2.1.301 and later), and their API can change between releases.
+Claude Code draws its own screen in the Chat tab, so all of its features work as usual. The ccs-bridge mod (`mods/ccs-bridge`) tells ccs when a session is ready, works, shows a permission dialog, is answered and goes idle, when it waits on background work or a scheduled wakeup to go on (asleep, ◐, which submit-and-advance skips like a working one), and when it is renamed. Claude titles a session started with `/plan <prompt>` only once the plan is approved, so until then the mod has Haiku title it from the prompt's first 120 characters. The ccs-traces mod (`mods/ccs-traces`) draws each run of tool calls (the calls Claude makes between two of its texts) as one line, `● 5 tool calls · Read 3 · Bash 2`: click it to list the calls, click a call to see its whole input and output, and click it, or anything it shows, again to fold it. It draws only in Claude's fullscreen mode (`"tui": "fullscreen"`), the one that takes clicks. The ccs mod (`mods/ccs`) gives each session a skill, `/ccs:help`, that tells Claude how ccs works: Claude reads it when you ask about ccs, its keys, tabs, worktrees, merging or themes, or you run it yourself. Mods are an early-access Claude Code feature (2.1.301 and later), and their API can change between releases.
 
 | Directory | Role |
 |---|---|
@@ -28,6 +28,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 | `crates/ccs-term` | PTY-backed tabs, key and mouse encoding |
 | `mods/ccs-bridge` | The Claude Code mod that reports each session's state to ccs |
 | `mods/ccs-traces` | The Claude Code mod that folds each run of tool calls into one line you can click open |
+| `mods/ccs` | The `/ccs:help` skill that explains ccs to Claude, written from this README: change it along with the README |
 | `themes` | The built-in themes |
 
 ## Use cases
