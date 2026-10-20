@@ -1,6 +1,6 @@
 ---
 name: help
-description: This Claude Code session runs inside ccs (claude-screen), a terminal workspace for many Claude sessions, each with its own tabs. Use when the user asks how to use ccs, or about its sessions, tabs, the leader key (Ctrl-Space), switching or finding sessions, submit and advance, new sessions, worktrees, merging a session (leader m), themes, or ~/.config/ccs/config.toml.
+description: This Claude Code session runs inside ccs (claude-screen), a terminal workspace for many Claude sessions, each with its own tabs. Use when the user asks how to use ccs, or about its sessions, tabs, the leader key (Ctrl-Space), switching or finding sessions, submit and advance, new sessions, worktrees, merging a session (leader m), themes, ~/.config/ccs/config.toml, or a project's .ccs/config.toml.
 ---
 
 # Explaining ccs
@@ -107,7 +107,7 @@ key = "<leader>t"
 command = "cargo test"
 ```
 
-Any `[[tab]]` replaces the default `review` and `shell` tabs, so a user who adds one and wants those back lists them too.
+Any `[[tab]]` in the user's config replaces the default `review` and `shell` tabs, so a user who adds one and wants those back lists them too. A project's `[[tab]]` adds to them instead (see Configuration).
 
 ## Merging a session (leader m)
 
@@ -126,7 +126,7 @@ Leader m does nothing while Claude is working, waiting for the user, or asleep, 
 
 ## Configuration
 
-Everything lives in `~/.config/ccs/config.toml`. ccs reads it when it starts, so a change takes a restart of ccs. Top-level options:
+The user's config lives in `~/.config/ccs/config.toml`. ccs reads it when it starts, so a change takes a restart of ccs. Top-level options:
 
 - `leader`, default `"<C-Space>"`.
 - `theme`, unset by default.
@@ -135,7 +135,23 @@ Everything lives in `~/.config/ccs/config.toml`. ccs reads it when it starts, so
 - `plan = true`.
 - `[keys]`, `[[tab]]` and `[[merge]]`, as above.
 
-ccs rejects unknown fields and clashing keys when it starts, and says which.
+A project can change any of it for its own sessions with `.ccs/config.toml` in its root: the main checkout, also when ccs starts in a worktree or a subdirectory. It wins over the user's config and lists only what it changes:
+
+- An option it sets replaces the user's. Each action under its `[keys]` takes its keys instead of the user's.
+- A `[[tab]]` or `[[merge]]` with the name of one of the user's changes only the fields it lists, so this changes the review tab's command and keeps its keys and mode:
+
+  ```toml
+  [[tab]]
+  name = "review"
+  command = "git diff --stat"
+  ```
+
+- A new name adds a tab or action after the user's. It needs a `command`.
+- `disabled_tabs = ["shell"]` takes tabs away. A name the user doesn't have is skipped, and a disabled tab's keys are free for the project's tabs.
+
+The project file is read when ccs starts too. ccs doesn't ask before using it, and its `regular` tabs run as soon as a session starts.
+
+ccs rejects unknown fields and clashing keys when it starts, and says which file.
 
 ## Not there yet
 

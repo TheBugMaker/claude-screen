@@ -1,5 +1,7 @@
 # Example ~/.config/ccs/config.toml
 #
+# A project's .ccs/config.toml changes any of it for that project: see example-project.toml.
+#
 # Every Claude session gets a Chat tab plus the tabs below. Without any [[tab]], ccs uses
 # a `review` tab (git diff) and a `shell` tab ($SHELL). Commands run with `sh -c` in the
 # session's directory (its worktree, when it has one), with TERM=xterm-256color and:

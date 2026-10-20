@@ -13,8 +13,12 @@ mod socket;
 mod theme;
 mod ui;
 
-use std::io::stdout;
+use std::{
+    io::stdout,
+    path::{Path, PathBuf},
+};
 
+use ccs_claude::history;
 use ccs_core::{config::Config, paths};
 use clap::Parser;
 use color_eyre::eyre::WrapErr;
@@ -46,10 +50,15 @@ async fn main() -> color_eyre::Result<()> {
 
     // Read the config and start the first session before taking over the terminal, so errors
     // print normally.
+    let past = cli.resume.as_deref().map(app::find_past).transpose()?;
+    let dir = past.as_ref().map_or(cli.dir.as_path(), |(dir, _)| dir);
     let config_dir = paths::config_dir()?;
     let config_path = config_dir.join("config.toml");
+    let project_path = paths::project_config(&project_root(dir));
     let config = Config::load(&config_path)
-        .wrap_err_with(|| format!("loading {}", config_path.display()))?;
+        .wrap_err_with(|| format!("loading {}", config_path.display()))?
+        .load_project(&project_path)
+        .wrap_err_with(|| format!("loading {}", project_path.display()))?;
     let claude_theme = match &config.theme {
         Some(name) => {
             let (colors, text) = theme::load(name, &config_dir.join("themes"))
@@ -69,10 +78,7 @@ async fn main() -> color_eyre::Result<()> {
     let socket = socket::listen(socket_path.clone(), reports)
         .wrap_err_with(|| format!("listening on {}", socket_path.display()))?;
     let mut app = App::new(config, scans, ptys, socket.path().to_owned(), claude_theme);
-    match &cli.resume {
-        Some(id) => app.resume(id)?,
-        None => app.open(&cli.dir, None, true)?,
-    }
+    app.open(dir, past.as_ref().map(|(_, past)| past), true)?;
 
     let mut terminal = ratatui::init();
     // ratatui's panic hook restores raw mode and the main screen, but not the modes set below.
@@ -98,6 +104,13 @@ async fn main() -> color_eyre::Result<()> {
     leave_modes();
     ratatui::restore();
     result
+}
+
+/// The root of the project `dir` is in, where its config is: the top of its main checkout, also
+/// from a worktree Claude made or a subdirectory, else `dir` outside git.
+fn project_root(dir: &Path) -> PathBuf {
+    let top = git::toplevel(dir).unwrap_or_else(|| dir.to_owned());
+    history::worktree_repo(&top).unwrap_or(&top).to_owned()
 }
 
 /// Turns off the terminal modes `main` turns on after `ratatui::init`.

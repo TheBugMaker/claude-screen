@@ -715,17 +715,6 @@ impl App {
         self.views[self.active].fit(self.window);
     }
 
-    /// Resumes a past session by id, from the directory it ran in.
-    pub fn resume(&mut self, id: &str) -> color_eyre::Result<()> {
-        let past = history::find_session(&history::projects_dir()?, id)?
-            .ok_or_eyre(format!("no Claude Code session with id {id}"))?;
-        let cwd = past
-            .cwd
-            .clone()
-            .ok_or_eyre("the session has no directory")?;
-        self.open(resume_from(&cwd), Some(&past), true)
-    }
-
     /// Starts a new session where the one on screen started, in a worktree of its own only if
     /// `worktree`.
     fn open_new(&mut self, worktree: bool) {
@@ -1918,6 +1907,17 @@ pub(crate) fn worktree_name(cwd: &Path) -> Option<String> {
 /// worktree it made: it goes back into the worktree itself, or says the worktree is gone.
 fn resume_from(cwd: &Path) -> &Path {
     history::worktree_repo(cwd).unwrap_or(cwd)
+}
+
+/// The past session `id`, and the directory to resume it from (`App::open`).
+pub fn find_past(id: &str) -> color_eyre::Result<(PathBuf, PastSession)> {
+    let past = history::find_session(&history::projects_dir()?, id)?
+        .ok_or_eyre(format!("no Claude Code session with id {id}"))?;
+    let cwd = past
+        .cwd
+        .as_deref()
+        .ok_or_eyre("the session has no directory")?;
+    Ok((resume_from(cwd).to_owned(), past))
 }
 
 /// Reads the title Claude gave the session's conversation, so its chip follows it. Does nothing

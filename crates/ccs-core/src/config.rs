@@ -1,6 +1,6 @@
 //! `~/.config/ccs/config.toml`: the leader key and the `[keys]` of each action, the theme, the
 //! slide between sessions, worktrees, plan mode, the `[[tab]]` definitions and the `[[merge]]`
-//! actions.
+//! actions. A project's `.ccs/config.toml` changes any of them for the sessions there.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -97,6 +97,47 @@ pub struct TabDef {
     pub command: String,
 }
 
+/// A project's `.ccs/config.toml`: only what it changes of your config. What it sets replaces
+/// yours, and a `[[tab]]` or `[[merge]]` with the name of one of yours changes only the fields it
+/// lists.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct ProjectConfig {
+    leader: Option<Key>,
+    keys: BTreeMap<Action, Bindings>,
+    theme: Option<String>,
+    slide_ms: Option<u64>,
+    worktree: Option<bool>,
+    plan: Option<bool>,
+    /// Your tabs it takes away, by name. Names you don't have are skipped.
+    disabled_tabs: Vec<String>,
+    #[serde(rename = "tab")]
+    tabs: Vec<TabPatch>,
+    #[serde(rename = "merge")]
+    merges: Vec<MergePatch>,
+}
+
+/// A `[[tab]]` of a project: changes to your tab of that name, else a new tab.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TabPatch {
+    name: String,
+    key: Option<Bindings>,
+    split_key: Option<Bindings>,
+    mode: Option<Mode>,
+    command: Option<String>,
+}
+
+/// A `[[merge]]` of a project: changes to your action of that name, else a new action.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergePatch {
+    name: String,
+    commit: Option<String>,
+    command: Option<String>,
+    on_conflict: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -172,6 +213,84 @@ impl Config {
         }
         config.validate()?;
         Ok(config)
+    }
+
+    /// Applies the project config at `path` over this one; a missing file changes nothing.
+    pub fn load_project(self, path: &Path) -> Result<Self, Error> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => self.apply(&text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(self),
+            Err(err) => Err(Error::Read(err)),
+        }
+    }
+
+    /// Applies a project config over this one. Disabled tabs go after the others are changed, so
+    /// disabling one wins; the result is checked as a whole, so a disabled tab's keys are free.
+    pub fn apply(mut self, text: &str) -> Result<Self, Error> {
+        let project: ProjectConfig = toml::from_str(text)?;
+        self.leader = project.leader.unwrap_or(self.leader);
+        self.keys.extend(project.keys);
+        self.theme = project.theme.or(self.theme);
+        self.slide_ms = project.slide_ms.unwrap_or(self.slide_ms);
+        self.worktree = project.worktree.unwrap_or(self.worktree);
+        self.plan = project.plan.unwrap_or(self.plan);
+        for patch in project.tabs {
+            let Some(tab) = self.tabs.iter_mut().find(|t| t.name == patch.name) else {
+                let command = patch.command.ok_or_else(|| {
+                    Error::Invalid(format!("tab {:?}: a new tab needs a command", patch.name))
+                })?;
+                self.tabs.push(TabDef {
+                    name: patch.name,
+                    key: patch.key.unwrap_or_default(),
+                    split_key: patch.split_key.unwrap_or_default(),
+                    mode: patch.mode.unwrap_or_default(),
+                    command,
+                });
+                continue;
+            };
+            if let Some(key) = patch.key {
+                tab.key = key;
+            }
+            if let Some(split_key) = patch.split_key {
+                tab.split_key = split_key;
+            }
+            if let Some(mode) = patch.mode {
+                tab.mode = mode;
+            }
+            if let Some(command) = patch.command {
+                tab.command = command;
+            }
+        }
+        for patch in project.merges {
+            let Some(merge) = self.merges.iter_mut().find(|m| m.name == patch.name) else {
+                let command = patch.command.ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "merge {:?}: a new action needs a command",
+                        patch.name
+                    ))
+                })?;
+                self.merges.push(MergeDef {
+                    name: patch.name,
+                    commit: patch.commit.unwrap_or_else(merge_commit),
+                    command,
+                    on_conflict: patch.on_conflict,
+                });
+                continue;
+            };
+            if let Some(commit) = patch.commit {
+                merge.commit = commit;
+            }
+            if let Some(command) = patch.command {
+                merge.command = command;
+            }
+            if patch.on_conflict.is_some() {
+                merge.on_conflict = patch.on_conflict;
+            }
+        }
+        self.tabs
+            .retain(|tab| !project.disabled_tabs.contains(&tab.name));
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -361,6 +480,147 @@ mod tests {
         );
         // The leader can go after the leader with another key.
         assert!(Config::parse("[keys]\nquit = \"<leader><C-q>\"").is_ok());
+    }
+
+    #[test]
+    fn example_project_config_applies() {
+        let config = Config::default()
+            .apply(include_str!("../../../config/example-project.toml"))
+            .unwrap();
+        let names: Vec<&str> = config.tabs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["review", "tests"]);
+        assert!(!config.plan);
+        assert_eq!(config.tabs[1].key, Bindings::after_leader(Key::char('t')));
+    }
+
+    #[test]
+    fn a_project_changes_only_what_it_sets() {
+        let yours = Config::parse("slide_ms = 0\n[keys]\nquit = \"<A-q>\"").unwrap();
+        let config = yours
+            .clone()
+            .apply("plan = false\n[keys]\nfind = \"<A-f>\"")
+            .unwrap();
+        assert_eq!(config.slide_ms, 0);
+        assert!(!config.plan);
+        assert!(config.worktree);
+        assert_eq!(config.leader, yours.leader);
+        assert_eq!(
+            config.keys[&Action::Find],
+            Bindings(vec![Binding::parse("<A-f>").unwrap()])
+        );
+        assert_eq!(config.keys[&Action::Quit], yours.keys[&Action::Quit]);
+        assert_eq!(config.tabs, yours.tabs);
+        assert_eq!(config.merges, yours.merges);
+        // Nothing at all, or no file: your config as it is.
+        assert_eq!(yours.clone().apply("").unwrap(), yours);
+        let missing = Path::new("/nonexistent/project/.ccs/config.toml");
+        assert_eq!(yours.clone().load_project(missing).unwrap(), yours);
+    }
+
+    #[test]
+    fn a_project_tab_changes_yours_of_that_name_or_is_added() {
+        let config = Config::default()
+            .apply(
+                "[[tab]]\nname = \"review\"\ncommand = \"git diff --stat\"\n\
+                 [[tab]]\nname = \"tests\"\ncommand = \"cargo test\"\nmode = \"regular\"",
+            )
+            .unwrap();
+        let [review, shell, tests] = &config.tabs[..] else {
+            panic!("{:?}", config.tabs);
+        };
+        assert_eq!(
+            *review,
+            TabDef {
+                command: "git diff --stat".into(),
+                ..Config::default().tabs[0].clone()
+            }
+        );
+        assert_eq!(*shell, Config::default().tabs[1]);
+        assert_eq!(
+            *tests,
+            TabDef {
+                name: "tests".into(),
+                key: Bindings::default(),
+                split_key: Bindings::default(),
+                mode: Mode::Regular,
+                command: "cargo test".into(),
+            }
+        );
+        // A new one has nothing to start from.
+        assert!(
+            Config::default()
+                .apply("[[tab]]\nname = \"tests\"")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_project_merge_changes_yours_of_that_name_or_is_added() {
+        let config = Config::default()
+            .apply(
+                "[[merge]]\nname = \"merge\"\ncommand = \"git push\"\n\
+                 [[merge]]\nname = \"pr\"\ncommand = \"gh pr create --fill\"",
+            )
+            .unwrap();
+        assert_eq!(
+            config.merges,
+            vec![
+                MergeDef {
+                    command: "git push".into(),
+                    ..Config::default().merges[0].clone()
+                },
+                MergeDef {
+                    name: "pr".into(),
+                    commit: MERGE_COMMIT.into(),
+                    command: "gh pr create --fill".into(),
+                    on_conflict: None,
+                },
+            ]
+        );
+        assert!(Config::default().apply("[[merge]]\nname = \"pr\"").is_err());
+        assert!(
+            Config::default()
+                .apply("[[merge]]\nname = \"merge\"\ncommand = \" \"")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_project_disables_tabs_and_frees_their_keys() {
+        let names = |config: &Config| -> Vec<String> {
+            config.tabs.iter().map(|t| t.name.clone()).collect()
+        };
+        let config = Config::default()
+            .apply("disabled_tabs = [\"shell\", \"lazygit\"]")
+            .unwrap();
+        assert_eq!(names(&config), ["review"]);
+        // Disabling wins over changing it.
+        let config = Config::default()
+            .apply("disabled_tabs = [\"shell\"]\n[[tab]]\nname = \"shell\"\ncommand = \"zsh\"")
+            .unwrap();
+        assert_eq!(names(&config), ["review"]);
+        // <leader>r is the review tab's, until it goes.
+        let tab = "[[tab]]\nname = \"run\"\nkey = \"<leader>r\"\ncommand = \"cargo run\"";
+        assert!(Config::default().apply(tab).is_err());
+        let config = Config::default()
+            .apply(&format!("disabled_tabs = [\"review\"]\n{tab}"))
+            .unwrap();
+        assert_eq!(names(&config), ["shell", "run"]);
+    }
+
+    #[test]
+    fn rejects_bad_project_configs() {
+        for text in [
+            "tabs_off = 1",
+            "disabled_tabs = \"shell\"",
+            "[[tab]]\nname = \"review\"\nkind = \"claude\"",
+            "[[tab]]\ncommand = \"x\"",
+            "[[tab]]\nname = \"review\"\nkey = \"r\"",
+            "[[merge]]\nname = \"merge\"\nthen = \"keep\"",
+            "leader = \"a\"",
+        ] {
+            assert!(Config::default().apply(text).is_err(), "accepted: {text}");
+        }
     }
 
     #[test]

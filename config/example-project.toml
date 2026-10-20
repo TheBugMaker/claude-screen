@@ -1,0 +1,32 @@
+# Example .ccs/config.toml, in a project's root: its main checkout, when ccs starts in a
+# worktree or a subdirectory of it.
+#
+# It changes your ~/.config/ccs/config.toml for the sessions of this project, and lists only
+# what it changes: any option of config.toml (see example.toml) replaces yours, and the others
+# stay as you have them.
+#
+#   [keys]       each action listed takes these keys instead of yours
+#   [[tab]]      with the name of one of your tabs: changes only the fields it lists, and the
+#                tab stays where it is. With a new name: a new tab after yours, which needs a
+#                command
+#   [[merge]]    the same, by name: "merge" is the default action
+#
+# Its commands run like yours, when a session starts for regular tabs: ccs doesn't ask first,
+# so look at the file of a project you didn't write before you start ccs in it.
+
+# Sessions here start in your default mode, not in plan mode.
+plan = false
+
+# Your tabs this project has no use for, by name. A name you don't have is skipped.
+disabled_tabs = ["shell"]
+
+# Only the command of the review tab changes: its keys and mode stay yours.
+[[tab]]
+name = "review"
+command = "git --no-pager diff --stat $CS_GIT_BASE"
+
+# A tab of this project's own.
+[[tab]]
+name = "tests"
+key = "<leader>t"
+command = "cargo test"

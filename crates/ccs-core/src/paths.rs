@@ -3,7 +3,7 @@
 //! XDG layout on both Linux and macOS (`~/.config/ccs`, `~/.local/state/ccs`),
 //! which is what terminal users expect on macOS too.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy;
 
@@ -14,6 +14,12 @@ const APP_DIR: &str = "ccs";
 /// Directory holding `config.toml`.
 pub fn config_dir() -> Result<PathBuf, Error> {
     Ok(etcetera::choose_base_strategy()?.config_dir().join(APP_DIR))
+}
+
+/// The config of the project whose root is `root`: `.ccs/config.toml` there.
+#[must_use]
+pub fn project_config(root: &Path) -> PathBuf {
+    root.join(".ccs").join("config.toml")
 }
 
 /// Directory for logs and persisted session state.
