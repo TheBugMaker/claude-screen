@@ -86,7 +86,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let merge = view
         .on_merge_tab()
         .then(|| key_hint(&app.config, Action::Merge));
-    let left = rule_status(notice, tab, view.tab > 0, merge.as_deref());
+    let left = match app.merge_session_target(app.active) {
+        // Nothing else says what leader m does in a merge session.
+        Some(target) if notice.is_none() && view.tab == 0 => {
+            let merge = key_hint(&app.config, Action::Merge);
+            Line::from(format!(
+                "merge into {target}: review it, then {merge} commits it"
+            ))
+            .fg(theme::get().dim)
+        }
+        _ => rule_status(notice, tab, view.tab > 0, merge.as_deref()),
+    };
     render_rule(frame, status, left, leader_hint(app));
     render_leader(frame, app, status);
     render_modal(frame, app);
@@ -193,13 +203,18 @@ fn render_modal(frame: &mut Frame, app: &mut App) {
 fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
     let theme = theme::get();
     let title = match &panel.target {
+        Some(target) if panel.finish => format!(" Finish merge · {} → {target} ", panel.branch),
         _ if panel.plain() => format!(" Commit · {} ", panel.branch),
         Some(target) => format!(" Merge · {} → {target} ", panel.branch),
         None => format!(" Merge · {} ", panel.branch),
     };
-    let committing = !panel.changes.is_empty();
-    let mut keys = format!(" Enter {} ", actions[panel.action]);
-    if actions.len() > 1 {
+    let committing = panel.commit_message().is_some();
+    let mut keys = if panel.finish {
+        " Enter commit the merge ".to_owned()
+    } else {
+        format!(" Enter {} ", actions[panel.action])
+    };
+    if actions.len() > 1 && !panel.finish {
         keys.push_str("· Tab action ");
     }
     keys.push_str("· Esc cancel ");
@@ -241,7 +256,7 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
     if panel.ahead > 0 {
         counts.push(plural(panel.ahead, "commit"));
     }
-    if committing {
+    if !panel.changes.is_empty() {
         counts.push(plural(panel.changes.len(), "changed file"));
     }
     let mut lines = vec![Line::from(counts.join(" · "))];
@@ -285,7 +300,7 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
 fn merge_notes(panel: &MergePanel, actions: &[&str]) -> Vec<Line<'static>> {
     let theme = theme::get();
     let mut notes = Vec::new();
-    if actions.len() > 1 {
+    if actions.len() > 1 && !panel.finish {
         let mut spans = vec![Span::raw("Action ").fg(theme.dim)];
         for (i, name) in actions.iter().enumerate() {
             spans.push(if i == panel.action {
@@ -1033,6 +1048,7 @@ mod tests {
             message: crate::input::Input::default(),
             action: 1,
             needs_message: true,
+            finish: false,
         };
         panel.message.insert("Add the merge action");
         let mut terminal = Terminal::new(TestBackend::new(70, 18)).unwrap();
@@ -1057,6 +1073,27 @@ mod tests {
         panel.branch = "main".into();
         panel.changes = vec![" M src/app.rs".into()];
         assert!(text(&panel).contains("Commit · main"));
+
+        // A merge session finishes the merge it fixed: the files go in with git's message.
+        panel.branch = "worktree-ccs-1".into();
+        panel.ahead = 0;
+        panel.finish = true;
+        let finish = draw(70, 18, |frame| {
+            render_merge(frame, &panel, &["merge", "pull request"]);
+        })
+        .backend()
+        .to_string();
+        assert!(
+            finish.contains("Finish merge · worktree-ccs-1 → main"),
+            "{finish}"
+        );
+        assert!(finish.contains("1 changed file"), "{finish}");
+        assert!(
+            finish.contains("Enter commit the merge · Esc cancel"),
+            "{finish}"
+        );
+        assert!(!finish.contains("Commit message"), "{finish}");
+        assert!(!finish.contains("Tab action"), "{finish}");
     }
 
     #[test]

@@ -5,6 +5,11 @@ use ccs_core::config::MergeDef;
 
 use crate::input::Input;
 
+/// What leader m runs in a merge session once its conflicts are fixed: the commit that finishes
+/// the merge, with what you changed in tracked files while reviewing it. Git's own message keeps
+/// the `Merge branch '…'` the finder tells merged sessions by.
+pub const FINISH: &str = "git commit -a --no-edit";
+
 /// The panel leader m opens: what the merge takes, the commit message, and the action.
 pub struct MergePanel {
     /// The session it merges, by key.
@@ -26,6 +31,9 @@ pub struct MergePanel {
     pub action: usize,
     /// Enter was pressed with changes to commit, but no message.
     pub needs_message: bool,
+    /// It finishes the merge of another session, whose conflicts this one fixed: it commits it,
+    /// with git's message.
+    pub finish: bool,
 }
 
 impl MergePanel {
@@ -35,9 +43,10 @@ impl MergePanel {
         self.target.as_deref() == Some(self.branch.as_str())
     }
 
-    /// The commit message, when there is something to commit: what was typed, trimmed.
+    /// The commit message, when there is something to commit: what was typed, trimmed. None when
+    /// it finishes a merge.
     pub fn commit_message(&self) -> Option<&str> {
-        (!self.changes.is_empty()).then(|| self.message.text().trim())
+        (!self.finish && !self.changes.is_empty()).then(|| self.message.text().trim())
     }
 }
 

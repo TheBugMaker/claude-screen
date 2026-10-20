@@ -25,9 +25,10 @@ git merge --no-edit "$CS_BRANCH""#;
 
 /// What the default `[[merge]]` asks the Claude that fixes its conflicts to do.
 pub const MERGE_ON_CONFLICT: &str = "Merging branch `$CS_BRANCH` into `$CS_REPO_BRANCH` stopped \
-on conflicts in this checkout. Resolve each conflict, keeping what both sides meant, and run the \
-project's checks if it has them. Then finish the merge with `git commit --no-edit`. If a conflict \
-can't be resolved safely, stop and explain it, and leave the merge unfinished.";
+on conflicts in this checkout. Resolve each conflict, keeping what both sides meant, mark each \
+resolved file with `git add`, and run the project's checks if it has them. Don't commit the merge \
+and don't abort it: I review it and commit it myself. If a conflict can't be resolved safely, \
+stop and explain it.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -69,8 +70,9 @@ pub struct MergeDef {
     /// the work is in, and the session closes.
     pub command: String,
     /// What to ask Claude when `command` stops on conflicts: `$CS_*` names are filled in. The
-    /// session's own Claude gets it for conflicts in its directory, a new session in the main
-    /// checkout for conflicts there. Without it, a conflict only gets a notice.
+    /// session's own Claude gets it for conflicts in its directory, a new merge session in the
+    /// main checkout for conflicts there, where leader m then commits the merge. Without it, a
+    /// conflict only gets a notice.
     pub on_conflict: Option<String>,
 }
 

@@ -117,8 +117,10 @@ command = "lazygit"
 #                session closes, and its worktree goes if nothing in it would be lost
 #   on_conflict  when the command stops on conflicts, the prompt for the Claude that fixes
 #                them, with $CS_* names filled in: the session's own Claude for conflicts in its
-#                directory, a new session in the main checkout for conflicts there. Once the
-#                merge is in, both close. Without it, a conflict only gets a notice
+#                directory, a new merge session in the main checkout for conflicts there. You
+#                review its fix, and leader m in it commits the merge; then both close. While
+#                Claude fixes them you go on to a session that needs you, and Enter takes you
+#                back there first once it is done. Without it, a conflict only gets a notice
 #
 # Leader m does nothing while Claude is working, nor when there is nothing to merge. With
 # several [[merge]], Tab picks one in the panel. This one is the default:
@@ -133,9 +135,9 @@ git diff --quiet HEAD || { echo "$CS_REPO has uncommitted changes, or an unfinis
 git merge --no-edit "$CS_BRANCH"'''
 on_conflict = """\
 Merging branch `$CS_BRANCH` into `$CS_REPO_BRANCH` stopped on conflicts in this checkout. \
-Resolve each conflict, keeping what both sides meant, and run the project's checks if it has \
-them. Then finish the merge with `git commit --no-edit`. If a conflict can't be resolved \
-safely, stop and explain it, and leave the merge unfinished."""
+Resolve each conflict, keeping what both sides meant, mark each resolved file with `git add`, \
+and run the project's checks if it has them. Don't commit the merge and don't abort it: I \
+review it and commit it myself. If a conflict can't be resolved safely, stop and explain it."""
 
 # Others, for example:
 #

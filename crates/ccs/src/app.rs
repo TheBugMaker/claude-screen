@@ -133,8 +133,9 @@ pub struct View {
 
 /// A merge of a session's work: its `[[merge]]` running in a tab, and what came of it.
 struct MergeRun {
-    /// The `[[merge]]`, by its place in the config.
-    action: usize,
+    /// The `[[merge]]`, by its place in the config. None for the commit that finishes the merge of
+    /// another session, whose conflicts this one fixed.
+    action: Option<usize>,
     /// The key of the merge tab's terminal.
     tab: u64,
     /// The variables it ran with, which its conflict prompt is filled in from too.
@@ -145,6 +146,19 @@ struct MergeRun {
     target: String,
     /// The session fixing the conflicts it stopped on in the main checkout.
     fixer: Option<Fixer>,
+    /// The session's own Claude is fixing the conflicts it stopped on in its directory, for you
+    /// to review before leader m again.
+    fixing: bool,
+}
+
+/// What a session is to a merge that stopped on conflicts, for where Enter takes you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Plain,
+    /// Its Claude fixes the conflicts, for you to review: it goes first once it waits for you.
+    Fixing,
+    /// Another session fixes the conflicts of its merge: there is nothing to do in it meanwhile.
+    Merged,
 }
 
 /// A session started in the main checkout to fix the conflicts of a merge there.
@@ -688,10 +702,42 @@ impl App {
         self.notice_ok = true;
     }
 
+    /// Where the session whose merge session `key` fixes the conflicts is in `views`.
+    fn fixed_by(&self, key: u64) -> Option<usize> {
+        self.views.iter().position(|v| {
+            v.merge
+                .as_ref()
+                .and_then(|m| m.fixer.as_ref())
+                .is_some_and(|f| f.key == key)
+        })
+    }
+
+    /// The branch the merge that session `index` fixes goes into, while it is a merge session.
+    pub fn merge_session_target(&self, index: usize) -> Option<&str> {
+        let merged = self.fixed_by(self.views[index].key)?;
+        self.views[merged].merge.as_ref().map(|m| m.target.as_str())
+    }
+
+    /// What `view` is to a merge that stopped on conflicts.
+    fn role(&self, view: &View) -> Role {
+        if self.fixed_by(view.key).is_some() {
+            return Role::Fixing;
+        }
+        match &view.merge {
+            Some(run) if run.fixer.is_some() => Role::Merged,
+            Some(run) if run.fixing => Role::Fixing,
+            _ => Role::Plain,
+        }
+    }
+
     /// Goes to the session that needs you most, or opens a new one if none is waiting.
     fn advance(&mut self) {
-        let states: Vec<State> = self.views.iter().map(|v| v.session.state()).collect();
-        match next_waiting(&states, self.active) {
+        let sessions: Vec<(State, Role)> = self
+            .views
+            .iter()
+            .map(|v| (v.session.state(), self.role(v)))
+            .collect();
+        match next_waiting(&sessions, self.active) {
             // You go there to answer it, so to its Chat tab.
             Some(index) => {
                 self.active = index;
@@ -1015,7 +1061,7 @@ impl App {
                         finder.refresh();
                     }
                     Some(Modal::Merge(panel)) => {
-                        if !panel.changes.is_empty() {
+                        if panel.commit_message().is_some() {
                             panel.message.insert(&text);
                         }
                     }
@@ -1216,6 +1262,10 @@ impl App {
                 );
             }
         }
+        // A merge session only finishes the merge it fixed, which is the one under way there.
+        if let Some(merged) = self.fixed_by(view.key) {
+            return finish_panel(view, &self.views[merged]);
+        }
         // They would get in each other's way in the main checkout.
         if let Some(other) = self
             .views
@@ -1272,22 +1322,30 @@ impl App {
             message,
             action: 0,
             needs_message: false,
+            finish: false,
         })
     }
 
-    /// Runs the `[[merge]]` picked in `panel` in a merge tab of its session, and shows the tab.
+    /// Runs the `[[merge]]` picked in `panel` in a merge tab of its session, and shows the tab. In
+    /// a merge session, the commit that finishes the merge instead.
     fn run_merge(&mut self, panel: MergePanel) {
         // Closed since.
         let Some(index) = self.views.iter().position(|v| v.key == panel.view) else {
             return;
         };
-        let def = &self.config.merges[panel.action];
         let message = panel.commit_message().map(str::to_owned);
+        let (name, command, action) = if panel.finish {
+            ("finish merge".to_owned(), merge::FINISH.to_owned(), None)
+        } else {
+            let def = &self.config.merges[panel.action];
+            let command = merge::script(def, message.is_some());
+            (def.name.clone(), command, Some(panel.action))
+        };
         let tab_def = TabDef {
-            name: def.name.clone(),
+            name,
             key: Bindings::default(),
             mode: Mode::Lazy,
-            command: merge::script(def, message.is_some()),
+            command,
         };
         let key = self.next_key;
         self.next_key += 1;
@@ -1314,12 +1372,13 @@ impl App {
         view.tabs.push(tab);
         view.tab = view.tabs.len();
         view.merge = Some(MergeRun {
-            action: panel.action,
+            action,
             tab: key,
             env,
             before,
             target: panel.target.unwrap_or_default(),
             fixer: None,
+            fixing: false,
         });
     }
 
@@ -1337,11 +1396,22 @@ impl App {
         let Some(run) = &view.merge else {
             return;
         };
+        // The commit that finishes the merge whose conflicts this session fixed: once it is in,
+        // both sessions close.
+        let Some(action) = run.action else {
+            let key = view.key;
+            if status != "exit 0" {
+                self.notify(format!(
+                    "finishing the merge failed ({status}): see its tab"
+                ));
+            }
+            return self.check_fixer(key, false);
+        };
         let after = Unmerged {
             cwd: git::unmerged(&view.cwd),
             repo: git::unmerged(&view.repo),
         };
-        let def = &self.config.merges[run.action];
+        let def = &self.config.merges[action];
         let name = def.name.clone();
         let prompt = def.on_conflict.as_ref().map(|p| merge::expand(p, &run.env));
         match (merge::outcome(status, run.before, after), prompt) {
@@ -1419,8 +1489,9 @@ impl App {
         view
     }
 
-    /// Starts a session in the main checkout of session `index`, without a worktree, on `prompt`,
-    /// to fix the conflicts its merge stopped on there. Goes there if you are on `index`.
+    /// Starts a merge session in the main checkout of session `index`, without a worktree, on
+    /// `prompt`, to fix the conflicts its merge stopped on there, for you to review and finish.
+    /// Both are busy until then: if you are on `index`, you go on to a session that needs you.
     fn open_fixer(&mut self, index: usize, prompt: &str) {
         let repo = self.views[index].repo.clone();
         let tip = git::head(&self.views[index].cwd).unwrap_or_default();
@@ -1435,12 +1506,11 @@ impl App {
                 let name = ui::session_name(&self.views[index]);
                 self.views.push(fixer);
                 let fixer = self.views.len();
+                self.notify(format!(
+                    "merging {name} stopped on conflicts: session {fixer} is fixing them"
+                ));
                 if self.active == index {
-                    self.active = fixer - 1;
-                } else {
-                    self.notify(format!(
-                        "merging {name} stopped on conflicts: session {fixer} is fixing them"
-                    ));
+                    self.advance();
                 }
             }
             Err(err) => self.notify(format!(
@@ -1451,25 +1521,27 @@ impl App {
         }
     }
 
-    /// Types `text` into the Claude of session `index` and submits it. You stay where you are,
-    /// in its Chat if you are on it.
+    /// Types `text`, the prompt to fix the conflicts its merge stopped on in its directory, into
+    /// the Claude of session `index`, and submits it. It is busy until it waits for you to review
+    /// them: if you are on it, you go on to a session that needs you.
     fn prompt_claude(&mut self, index: usize, text: &str) {
-        let watching = self.active == index;
         let view = &mut self.views[index];
         let Some(pty) = &mut view.claude.pty else {
             return;
         };
         pty.paste(text);
         pty.key(KeyEvent::from(KeyCode::Enter));
-        // So its `submitted` report doesn't move you on.
+        // So its `submitted` report doesn't move you on again.
         view.last_key = Some((Instant::now(), Then::Stay));
-        if watching {
-            view.tab = 0;
-        } else {
-            let name = ui::session_name(view);
-            self.notify(format!(
-                "merging {name} stopped on conflicts: its Claude is fixing them"
-            ));
+        if let Some(run) = &mut view.merge {
+            run.fixing = true;
+        }
+        let name = ui::session_name(view);
+        self.notify(format!(
+            "merging {name} stopped on conflicts: its Claude is fixing them"
+        ));
+        if self.active == index {
+            self.advance();
         }
     }
 
@@ -1477,12 +1549,7 @@ impl App {
     /// idle, or `closed`. Once the merge is in, it and the session merged close. A merge that was
     /// aborted, or is unfinished as the session closes, is let go, and you are told.
     fn check_fixer(&mut self, key: u64, closed: bool) {
-        let Some(index) = self.views.iter().position(|v| {
-            v.merge
-                .as_ref()
-                .and_then(|m| m.fixer.as_ref())
-                .is_some_and(|f| f.key == key)
-        }) else {
+        let Some(index) = self.fixed_by(key) else {
             return;
         };
         let view = &mut self.views[index];
@@ -1607,6 +1674,8 @@ impl App {
                 .modifiers
                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
             match key.code {
+                // Finishing a merge has no action to pick.
+                KeyCode::Tab | KeyCode::BackTab if panel.finish => {}
                 KeyCode::Tab => panel.action = (panel.action + 1) % count,
                 KeyCode::BackTab => panel.action = (panel.action + count - 1) % count,
                 KeyCode::Enter if !newline => {
@@ -1618,7 +1687,7 @@ impl App {
                 }
                 // Only a message to type: nothing else in the panel takes keys.
                 _ => {
-                    if !panel.changes.is_empty() && panel.message.handle_key(key) {
+                    if panel.commit_message().is_some() && panel.message.handle_key(key) {
                         panel.needs_message = false;
                     }
                 }
@@ -1659,6 +1728,35 @@ impl App {
             }
         }
     }
+}
+
+/// What leader m would take from merge session `view`, which fixed the conflicts of the merge of
+/// `merged` into its main checkout: the commit that finishes it. Or why it can't now.
+fn finish_panel(view: &View, merged: &View) -> Result<MergePanel, String> {
+    if !git::merging(&view.cwd) {
+        return Err("no merge to finish here: it was committed or aborted".into());
+    }
+    // `git commit -a` would take them, conflict markers and all.
+    if git::unmerged(&view.cwd) {
+        return Err("files are still in conflict: resolve them and git add them first".into());
+    }
+    // Untracked files stay out of it.
+    let changes = git::changes(&view.cwd)?
+        .into_iter()
+        .filter(|change| !change.starts_with("??"))
+        .collect();
+    Ok(MergePanel {
+        view: view.key,
+        branch: git::branch(&merged.cwd).unwrap_or_default(),
+        target: merged.merge.as_ref().map(|m| m.target.clone()),
+        changes,
+        ahead: 0,
+        others: 0,
+        message: Input::default(),
+        action: 0,
+        needs_message: false,
+        finish: true,
+    })
 }
 
 /// The name of the worktree at `cwd`, if it is one Claude made: `.claude/worktrees/<name>`.
@@ -1703,23 +1801,27 @@ fn quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// The session after `from` that needs you most: a permission prompt, then one waiting for a
-/// prompt, then one still starting. Among equals, the nearest after `from`, wrapping around.
-fn next_waiting(states: &[State], from: usize) -> Option<usize> {
-    (1..states.len())
-        .map(|offset| (from + offset) % states.len())
-        .filter_map(|i| urgency(states[i]).map(|rank| (rank, i)))
+/// The session after `from` that needs you most: one that fixed a merge's conflicts, then a
+/// permission prompt, then one waiting for a prompt, then one still starting. Among equals, the
+/// nearest after `from`, wrapping around.
+fn next_waiting(sessions: &[(State, Role)], from: usize) -> Option<usize> {
+    (1..sessions.len())
+        .map(|offset| (from + offset) % sessions.len())
+        .filter_map(|i| urgency(sessions[i]).map(|rank| (rank, i)))
         .min_by_key(|&(rank, _)| rank)
         .map(|(_, i)| i)
 }
 
 /// Lower needs you sooner; `None` when the session doesn't need you.
-fn urgency(state: State) -> Option<u8> {
-    match state {
-        State::WaitingPermission => Some(0),
-        State::Idle => Some(1),
-        State::Starting => Some(2),
-        State::Working | State::Asleep => None,
+fn urgency((state, role): (State, Role)) -> Option<u8> {
+    match (role, state) {
+        (Role::Fixing, State::WaitingPermission | State::Idle) => Some(0),
+        // A Claude asking is never left waiting, even in the session merged.
+        (Role::Plain | Role::Merged, State::WaitingPermission) => Some(1),
+        (Role::Plain, State::Idle) => Some(2),
+        (Role::Plain, State::Starting) => Some(3),
+        // A merge session starting starts on the conflicts.
+        (Role::Fixing | Role::Merged, _) | (Role::Plain, State::Working | State::Asleep) => None,
     }
 }
 
@@ -1745,26 +1847,65 @@ mod tests {
 
     use super::*;
 
+    /// Where Enter goes from session `from` of sessions in `states`, none of them in a merge.
+    fn next_plain(states: &[State], from: usize) -> Option<usize> {
+        let sessions: Vec<(State, Role)> = states.iter().map(|&s| (s, Role::Plain)).collect();
+        next_waiting(&sessions, from)
+    }
+
     #[test]
     fn advances_to_the_session_that_needs_you_most() {
         // A permission prompt beats a nearer idle session.
-        assert_eq!(
-            next_waiting(&[Working, Idle, WaitingPermission], 0),
-            Some(2)
-        );
+        assert_eq!(next_plain(&[Working, Idle, WaitingPermission], 0), Some(2));
         // Among equals, the nearest after the current session, wrapping around.
-        assert_eq!(next_waiting(&[Idle, Working, Idle], 1), Some(2));
-        assert_eq!(next_waiting(&[Idle, Idle, Working], 2), Some(0));
+        assert_eq!(next_plain(&[Idle, Working, Idle], 1), Some(2));
+        assert_eq!(next_plain(&[Idle, Idle, Working], 2), Some(0));
         // A session still starting comes last.
-        assert_eq!(next_waiting(&[Working, Starting, Idle], 0), Some(2));
+        assert_eq!(next_plain(&[Working, Starting, Idle], 0), Some(2));
     }
 
     #[test]
     fn busy_and_current_sessions_are_not_waiting() {
-        assert_eq!(next_waiting(&[Working, Working, Working], 0), None);
-        assert_eq!(next_waiting(&[Idle], 0), None);
+        assert_eq!(next_plain(&[Working, Working, Working], 0), None);
+        assert_eq!(next_plain(&[Idle], 0), None);
         // Its background work or a scheduled wakeup goes on without you.
-        assert_eq!(next_waiting(&[Working, Asleep, Idle], 2), None);
+        assert_eq!(next_plain(&[Working, Asleep, Idle], 2), None);
+    }
+
+    #[test]
+    fn a_session_that_fixed_conflicts_comes_first_and_the_merged_one_waits() {
+        use Role::{Fixing, Merged, Plain};
+        // Done fixing, it beats a permission prompt nearer by, whether it asks or waits.
+        for state in [Idle, WaitingPermission] {
+            assert_eq!(
+                next_waiting(
+                    &[
+                        (Working, Plain),
+                        (WaitingPermission, Plain),
+                        (state, Fixing)
+                    ],
+                    0
+                ),
+                Some(2)
+            );
+        }
+        // Still fixing, or starting to: busy.
+        for state in [Starting, Working, Asleep] {
+            assert_eq!(
+                next_waiting(&[(Idle, Plain), (state, Fixing), (Starting, Plain)], 0),
+                Some(2)
+            );
+        }
+        // The session merged has nothing to do while another one fixes its conflicts, unless its
+        // Claude asks you something.
+        assert_eq!(next_waiting(&[(Working, Plain), (Idle, Merged)], 0), None);
+        assert_eq!(
+            next_waiting(
+                &[(Working, Plain), (Idle, Plain), (WaitingPermission, Merged)],
+                0
+            ),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2543,6 +2684,8 @@ mod tests {
         let pty = Pty::spawn("cat", &tree, &[], (80, 24), 0, app.ptys.clone()).unwrap();
         view.claude.pty = Some(pty);
         app.views.push(view);
+        // Waiting for you, for you to go to.
+        app.views.push(ready_view(1, &repo, &repo));
         // The same line, changed on both sides.
         std::fs::write(tree.join("a.txt"), "tree\n").unwrap();
         run_git(&tree, &["commit", "-qam", "tree"]);
@@ -2551,11 +2694,16 @@ mod tests {
         leader_key(&mut app, KeyCode::Char('m'));
         merge(&mut app, &mut events);
         assert!(git::unmerged(&tree));
-        assert_eq!(app.notice, None);
-        // You are taken to its Chat, and its prompt being submitted keeps you there.
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("merging new stopped on conflicts: its Claude is fixing them")
+        );
+        // Busy fixing them: you go on, and its prompt being submitted doesn't move you again.
+        assert_eq!(app.active, 1);
         let view = &app.views[0];
-        assert_eq!(view.tab, 0);
         assert!(matches!(view.last_key, Some((_, Then::Stay))));
+        // Once it waits for you, it goes first.
+        assert_eq!(app.role(view), Role::Fixing);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let wanted = "Fix the merge of main into worktree-ccs-1.";
         while !view
@@ -2576,8 +2724,9 @@ mod tests {
     }
 
     /// Two sessions of a repository, the second on screen with a commit that conflicts with main,
-    /// merged into the main checkout, where it stopped. No Claude starts to fix it.
-    fn conflict_in_main(name: &str) -> (App, PathBuf, PathBuf) {
+    /// merged into the main checkout, where it stopped. No Claude starts to fix it, but a third
+    /// session is linked as the merge session that does.
+    fn conflict_in_main(name: &str) -> (App, PtyEvents, PathBuf, PathBuf) {
         let (repo, tree) = merge_repo(name);
         let (mut app, mut events) = app_with_ptys();
         app.config.merges[0].on_conflict = None;
@@ -2601,12 +2750,62 @@ mod tests {
         app.views.push(ready_view(2, &repo, &repo));
         let tip = git::head(&tree).unwrap();
         app.views[1].merge.as_mut().unwrap().fixer = Some(Fixer { key: 2, tip });
-        (app, repo, tree)
+        (app, events, repo, tree)
+    }
+
+    #[test]
+    fn a_merge_session_is_reviewed_then_finished_with_leader_m() {
+        let (mut app, mut events, repo, tree) = conflict_in_main("finish");
+        // Fixing: you go on to a session that waits, not to the one merged.
+        app.views[2].session.bridge(Bridge::Submitted);
+        app.advance();
+        assert_eq!(app.active, 0);
+        // Done: it goes first, before the session merged.
+        app.on_bridge(2, Bridge::Idle);
+        app.advance();
+        assert_eq!(app.active, 2);
+        assert_eq!(app.merge_session_target(2), Some("main"));
+        // Leader m only finishes the merge, once nothing is in conflict.
+        leader_key(&mut app, KeyCode::Char('m'));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.notice.take().as_deref(),
+            Some("files are still in conflict: resolve them and git add them first")
+        );
+        std::fs::write(repo.join("a.txt"), "both\n").unwrap();
+        run_git(&repo, &["add", "a.txt"]);
+        // Your edit while reviewing it goes in too.
+        std::fs::write(repo.join("a.txt"), "both, reviewed\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        let Some(Modal::Merge(panel)) = &app.modal else {
+            panic!("no panel: {:?}", app.notice);
+        };
+        assert!(panel.finish);
+        assert_eq!(panel.branch, "worktree-ccs-1");
+        assert_eq!(panel.target.as_deref(), Some("main"));
+        assert_eq!(panel.changes, ["MM a.txt"]);
+        assert_eq!(panel.commit_message(), None);
+        merge(&mut app, &mut events);
+        // Both sessions closed, the worktree went, and the finder sees the branch merged.
+        assert_eq!(keys(&app), [0]);
+        assert_eq!(app.notice.as_deref(), Some("merged new into main"));
+        assert_eq!(run_git(&repo, &["show", "HEAD:a.txt"]), "both, reviewed");
+        assert_eq!(run_git(&repo, &["status", "--porcelain"]), "");
+        assert!(
+            git::merged_into(&repo, "main")
+                .unwrap()
+                .contains(&"worktree-ccs-1".to_owned())
+        );
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        assert!(!tree.exists());
+        std::fs::remove_dir_all(&repo).unwrap();
     }
 
     #[test]
     fn a_merge_fixed_in_the_main_checkout_closes_both_sessions() {
-        let (mut app, repo, tree) = conflict_in_main("fixed");
+        let (mut app, _events, repo, tree) = conflict_in_main("fixed");
         // Still in conflict: going idle changes nothing.
         app.on_bridge(2, Bridge::Idle);
         assert_eq!(keys(&app), [0, 1, 2]);
@@ -2635,7 +2834,7 @@ mod tests {
 
     #[test]
     fn an_aborted_merge_lets_both_sessions_be() {
-        let (mut app, repo, _) = conflict_in_main("aborted");
+        let (mut app, _events, repo, _) = conflict_in_main("aborted");
         run_git(&repo, &["merge", "--abort"]);
         app.on_bridge(2, Bridge::Idle);
         assert_eq!(keys(&app), [0, 1, 2]);
