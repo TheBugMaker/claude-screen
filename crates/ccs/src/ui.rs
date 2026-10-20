@@ -37,50 +37,50 @@ fn layout(area: Rect) -> [Rect; 4] {
     .areas(area)
 }
 
-/// Where terminal tabs draw in a window of `area`.
-pub fn terminal_area(area: Rect) -> Rect {
-    layout(area)[2]
+/// Where the tabs on screen draw in a window of `area`, from the left: all the room between the
+/// bars for one, its two halves either side of a rule for two.
+pub fn pane_areas(area: Rect, count: usize) -> Vec<Rect> {
+    let terminal = layout(area)[2];
+    if count < 2 {
+        return vec![terminal];
+    }
+    let [left, _, right] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(terminal);
+    vec![left, right]
 }
 
-/// The size (rows, columns) of every terminal tab in a window of `area`.
+/// The size (rows, columns) of a terminal drawn in `area`.
+pub fn size(area: Rect) -> (u16, u16) {
+    (area.height.max(1), area.width.max(1))
+}
+
+/// The size of a terminal tab on screen alone in a window of `area`, as every hidden one is.
 pub fn terminal_size(area: Rect) -> (u16, u16) {
-    let terminal = terminal_area(area);
-    (terminal.height.max(1), terminal.width.max(1))
+    size(layout(area)[2])
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    let [bar, tabs, terminal, status] = layout(frame.area());
+    let window = frame.area();
+    let [bar, tabs, terminal, status] = layout(window);
     (app.chip_areas, app.tab_areas) = render_header(frame, app, bar, tabs);
     let view = &app.views[app.active];
     let tab = view.terminal();
     let slide = app.slide(terminal.width);
-    match (&tab.pty, &tab.error) {
-        (_, Some(error)) => frame.render_widget(
-            Paragraph::new(error.clone()).fg(theme::get().error),
-            terminal,
-        ),
-        // The leader panel can cover the cursor's cell, and the cursor would show through. A
-        // screen still sliding in has none.
-        (Some(pty), None) => {
-            let focused = app.modal.is_none() && !app.leader_panel && slide.is_none();
-            pty.render(frame, terminal, focused);
-        }
-        // A peer tab starts once Claude has made the worktree it runs in.
-        (None, None) if view.waiting && view.tab > 0 => frame.render_widget(
-            Paragraph::new("waiting for Claude to make the session's worktree")
-                .fg(theme::get().dim),
-            terminal,
-        ),
-        (None, None) => {}
+    // The leader panel can cover the cursor's cell, and the cursor would show through. A screen
+    // still sliding in has none.
+    let focused = app.modal.is_none() && !app.leader_panel && slide.is_none();
+    let shown = view.shown();
+    let panes = pane_areas(window, shown.len());
+    for (&index, &area) in shown.iter().zip(&panes) {
+        render_pane(frame, view, index, area, focused && index == view.tab);
     }
+    draw_divider(frame.buffer_mut(), &panes);
     if let Some((from, moved, forward)) = slide {
-        render_slide(
-            frame.buffer_mut(),
-            terminal,
-            from.terminal(),
-            moved,
-            forward,
-        );
+        render_slide(frame.buffer_mut(), window, from, moved, forward);
     }
     let notice = app.notice.as_deref().map(|text| (text, app.notice_ok));
     let merge = view
@@ -103,14 +103,50 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     theme::get().paint(frame.buffer_mut());
 }
 
-/// Pushes the screen of `from` `moved` columns off `area`, by the screen drawn there, which comes
-/// in from the right if `forward`.
-fn render_slide(buffer: &mut Buffer, area: Rect, from: &Tab, moved: u16, forward: bool) {
-    let mut old = Buffer::empty(area);
-    // A tab that failed to start leaves blank.
-    if let Some(pty) = &from.pty {
-        pty.draw(&mut old, area);
+/// Tab `tab` of `view` in `area`, with the cursor if `focused`.
+fn render_pane(frame: &mut Frame, view: &View, tab: usize, area: Rect, focused: bool) {
+    let terminal = view.tab_at(tab);
+    match (&terminal.pty, &terminal.error) {
+        (_, Some(error)) => {
+            frame.render_widget(Paragraph::new(error.clone()).fg(theme::get().error), area);
+        }
+        (Some(pty), None) => pty.render(frame, area, focused),
+        // A peer tab starts once Claude has made the worktree it runs in.
+        (None, None) if view.waiting && tab > 0 => frame.render_widget(
+            Paragraph::new("waiting for Claude to make the session's worktree")
+                .fg(theme::get().dim),
+            area,
+        ),
+        (None, None) => {}
     }
+}
+
+/// A dim rule between two tabs side by side in `panes`; nothing for one.
+fn draw_divider(buffer: &mut Buffer, panes: &[Rect]) {
+    let [left, _] = panes else {
+        return;
+    };
+    for y in left.top()..left.bottom() {
+        if let Some(cell) = buffer.cell_mut((left.right(), y)) {
+            cell.set_symbol("│").set_fg(theme::get().dim);
+        }
+    }
+}
+
+/// Pushes the tabs `from` shows `moved` columns off the screen in a window of `window`, by the
+/// screen drawn there, which comes in from the right if `forward`.
+fn render_slide(buffer: &mut Buffer, window: Rect, from: &View, moved: u16, forward: bool) {
+    let area = layout(window)[2];
+    let mut old = Buffer::empty(area);
+    let shown = from.shown();
+    let panes = pane_areas(window, shown.len());
+    for (&tab, &pane) in shown.iter().zip(&panes) {
+        // A tab that failed to start leaves blank.
+        if let Some(pty) = &from.tab_at(tab).pty {
+            pty.draw(&mut old, pane);
+        }
+    }
+    draw_divider(&mut old, &panes);
     let mut new = Buffer::empty(area);
     for at in area.positions() {
         new[at] = buffer[at].clone();
@@ -157,11 +193,12 @@ fn render_header(frame: &mut Frame, app: &App, bar: Rect, tabs: Rect) -> (Vec<Re
         .collect();
     let chips = render_session_bar(frame, bar, &sessions, app.active);
     let view = &app.views[app.active];
+    let other = view.shown().into_iter().find(|&tab| tab != view.tab);
     let titles = render_tab_bar(
         frame,
         tabs,
         &tab_labels(view),
-        view.tab,
+        (view.tab, other),
         &home_relative(&view.cwd),
     );
     (chips, titles)
@@ -501,17 +538,18 @@ fn tab_key(keys: &Bindings) -> Option<String> {
 }
 
 /// The tab rule: the tabs over a rule, and the session's directory in the room left on the right.
-/// Returns where each tab's title went.
+/// `shown` is the tab with your keys, and the other one on screen when it is split. Returns where
+/// each tab's title went.
 fn render_tab_bar(
     frame: &mut Frame,
     area: Rect,
     labels: &[(Option<String>, &str, bool)],
-    selected: usize,
+    shown: (usize, Option<usize>),
     cwd: &str,
 ) -> Vec<Rect> {
     let titles = tab_titles(labels);
     let widths: Vec<usize> = titles.iter().map(Line::width).collect();
-    let tabs = tab_line(titles, selected);
+    let tabs = tab_line(titles, shown);
     // The rule at both ends and between the two, and the padding of both.
     let room = usize::from(area.width).saturating_sub(tabs.width() + 10);
     let count = cwd.chars().count();
@@ -557,24 +595,26 @@ fn tab_titles(labels: &[(Option<String>, &str, bool)]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The tabs on one line, between rules, the one on screen in the accent color.
-fn tab_line(titles: Vec<Line<'static>>, selected: usize) -> Line<'static> {
+/// The tabs on one line, between rules: the one with your keys in the accent color, the other one
+/// on screen in bold. `shown` is the two, as `render_tab_bar` takes them.
+fn tab_line(
+    titles: Vec<Line<'static>>,
+    (selected, other): (usize, Option<usize>),
+) -> Line<'static> {
     let highlight = Style::new().fg(theme::get().accent).bold();
     let mut spans = Vec::new();
     for (i, title) in titles.into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw(TAB_GAP).fg(theme::get().dim));
         }
-        if i == selected {
-            spans.extend(
-                title
-                    .spans
-                    .into_iter()
-                    .map(|span| span.patch_style(highlight)),
-            );
+        let style = if i == selected {
+            highlight
+        } else if Some(i) == other {
+            Style::new().bold()
         } else {
-            spans.extend(title.spans);
-        }
+            Style::new()
+        };
+        spans.extend(title.spans.into_iter().map(|span| span.patch_style(style)));
     }
     Line::from(spans)
 }
@@ -636,11 +676,11 @@ fn leader_hint(app: &App) -> Line<'static> {
     }
 }
 
-/// The keys after the leader and what they do in the tab on screen, a terminal tab if `peer`, as
-/// `App::command_for` finds them. `tabs` are the peer tabs' keys and names.
+/// The keys after the leader and what they do in the tab with your keys, a terminal tab if `peer`,
+/// as `App::command_for` finds them. `tabs` are the peer tabs' keys, split keys and names.
 fn leader_actions(
     config: &Config,
-    tabs: &[(&Bindings, &str)],
+    tabs: &[(&Bindings, &Bindings, &str)],
     peer: bool,
 ) -> Vec<(String, String)> {
     // The keys after the leader in `keys`, in one column.
@@ -669,7 +709,14 @@ fn leader_actions(
         if action == Action::Chat {
             rows.extend(
                 tabs.iter()
-                    .map(|&(keys, name)| (after(keys), name.to_owned()))
+                    .map(|&(keys, _, name)| (after(keys), name.to_owned()))
+                    .filter(|(keys, _)| !keys.is_empty()),
+            );
+        }
+        if action == Action::ChatSplit {
+            rows.extend(
+                tabs.iter()
+                    .map(|&(_, keys, name)| (after(keys), format!("{name}, split")))
                     .filter(|(keys, _)| !keys.is_empty()),
             );
         }
@@ -688,6 +735,8 @@ fn action_text(action: Action) -> String {
         Action::Find => "find a session",
         Action::Merge => "commit & merge",
         Action::Chat => "Chat",
+        Action::ChatSplit => "Chat, split",
+        Action::OtherPane => "other pane",
         Action::PreviousTab => "previous tab",
         Action::NextTab => "next tab",
         Action::RerunTab => "reload tab",
@@ -720,10 +769,10 @@ fn render_leader(frame: &mut Frame, app: &App, status: Rect) {
         return;
     }
     let view = &app.views[app.active];
-    let tabs: Vec<(&Bindings, &str)> = view
+    let tabs: Vec<(&Bindings, &Bindings, &str)> = view
         .tabs
         .iter()
-        .map(|t| (&t.def.key, t.def.name.as_str()))
+        .map(|t| (&t.def.key, &t.def.split_key, t.def.name.as_str()))
         .collect();
     let actions = leader_actions(&app.config, &tabs, view.tab > 0);
     let area = frame.area();
@@ -841,11 +890,8 @@ fn age(now: SystemTime, then: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ccs_core::{
-        config::{Mode, TabDef},
-        keys::Key,
-    };
-    use ratatui::{Terminal, backend::TestBackend};
+    use ccs_core::config::{Mode, TabDef};
+    use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
     use super::*;
 
@@ -948,7 +994,7 @@ mod tests {
         ];
         let mut titles = Vec::new();
         let terminal = draw(60, 1, |frame| {
-            titles = render_tab_bar(frame, frame.area(), &labels, 2, "~/work/web");
+            titles = render_tab_bar(frame, frame.area(), &labels, (2, None), "~/work/web");
         });
         insta::assert_snapshot!(terminal.backend());
         // Clicks find each title where it is drawn.
@@ -968,10 +1014,20 @@ mod tests {
         assert_eq!(buffer[(29, 0)].symbol(), "s");
         assert_eq!(buffer[(29, 0)].fg, theme::get().accent);
 
+        // Split: the other tab on screen is in bold, in its own color.
+        let terminal = draw(60, 1, |frame| {
+            render_tab_bar(frame, frame.area(), &labels, (2, Some(0)), "~/work/web");
+        });
+        let buffer = terminal.backend().buffer();
+        let bold = |x: u16| buffer[(x, 0)].modifier.contains(Modifier::BOLD);
+        assert_eq!(buffer[(5, 0)].symbol(), "C");
+        assert_eq!(buffer[(5, 0)].fg, Color::Reset);
+        assert!(bold(5) && bold(29) && !bold(14));
+
         // A long directory keeps its end, in the room the tabs leave.
         let terminal = draw(60, 1, |frame| {
             let cwd = "/tmp/claude-1000/scratchpad/projects/claude-screen";
-            render_tab_bar(frame, frame.area(), &labels, 2, cwd);
+            render_tab_bar(frame, frame.area(), &labels, (2, None), cwd);
         });
         assert_eq!(
             terminal.backend().to_string(),
@@ -984,6 +1040,7 @@ mod tests {
             def: TabDef {
                 name: name.into(),
                 key: Bindings::default(),
+                split_key: Bindings::default(),
                 mode: Mode::Lazy,
                 command: command.into(),
             },
@@ -1099,12 +1156,12 @@ mod tests {
     #[test]
     fn leader_panel_lists_the_keys_after_the_leader() {
         let config = Config::default();
-        let (review, shell) = (
-            Bindings::after_leader(Key::char('r')),
-            Bindings::after_leader(Key::char('s')),
-        );
-        let actions = leader_actions(&config, &[(&review, "review"), (&shell, "shell")], true);
-        let mut terminal = Terminal::new(TestBackend::new(44, 16)).unwrap();
+        let [review, shell] = &config.tabs[..] else {
+            panic!("not the two default tabs");
+        };
+        let tabs = [review, shell].map(|t| (&t.key, &t.split_key, t.name.as_str()));
+        let actions = leader_actions(&config, &tabs, true);
+        let mut terminal = Terminal::new(TestBackend::new(44, 24)).unwrap();
         terminal
             .draw(|frame| render_leader_panel(frame, frame.area(), "C-Space", &actions))
             .unwrap();
@@ -1169,5 +1226,12 @@ mod tests {
     fn terminal_tabs_fill_the_window_between_the_bars() {
         assert_eq!(terminal_size(Rect::new(0, 0, 80, 24)), (21, 80));
         assert_eq!(terminal_size(Rect::new(0, 0, 10, 2)), (1, 10));
+        // Split, they share it either side of a rule.
+        let window = Rect::new(0, 0, 80, 24);
+        assert_eq!(pane_areas(window, 1), [Rect::new(0, 2, 80, 21)]);
+        assert_eq!(
+            pane_areas(window, 2),
+            [Rect::new(0, 2, 40, 21), Rect::new(41, 2, 39, 21)]
+        );
     }
 }

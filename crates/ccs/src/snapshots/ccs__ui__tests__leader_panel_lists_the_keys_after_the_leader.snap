@@ -2,6 +2,9 @@
 source: crates/ccs/src/ui.rs
 expression: terminal.backend()
 ---
+"                                            "
+"                                            "
+"                                            "
 "      ╭ C-Space ───────────────────────────╮"
 "      │     1-9 ➜ go to session            │"
 "      │       , ➜ previous session         │"
@@ -13,8 +16,13 @@ expression: terminal.backend()
 "      │       c ➜ Chat                     │"
 "      │       r ➜ review                   │"
 "      │       s ➜ shell                    │"
+"      │       C ➜ Chat, split              │"
+"      │       R ➜ review, split            │"
+"      │       S ➜ shell, split             │"
+"      │       o ➜ other pane               │"
 "      │       [ ➜ previous tab             │"
 "      │       ] ➜ next tab                 │"
 "      │   Enter ➜ reload tab               │"
 "      │       q ➜ quit                     │"
+"      │ C-Space ➜ send to program          │"
 "      ╰ Esc cancel ────────────────────────╯"

@@ -88,6 +88,9 @@ pub struct TabDef {
     /// Go to the tab.
     #[serde(default)]
     pub key: Bindings,
+    /// Show the tab beside the one on screen, or take it off the screen if it is there.
+    #[serde(default)]
+    pub split_key: Bindings,
     #[serde(default)]
     pub mode: Mode,
     /// Run with `sh -c` in the session's directory, with the `CS_*` variables set.
@@ -97,7 +100,7 @@ pub struct TabDef {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Run every time the tab is opened.
+    /// Run every time the tab comes on screen.
     Eager,
     /// Run the first time the tab is opened.
     #[default]
@@ -126,12 +129,14 @@ impl Default for Config {
                 TabDef {
                     name: "review".into(),
                     key: Bindings::after_leader(Key::char('r')),
+                    split_key: Bindings::after_leader(Key::char('R')),
                     mode: Mode::Eager,
                     command: "git diff".into(),
                 },
                 TabDef {
                     name: "shell".into(),
                     key: Bindings::after_leader(Key::char('s')),
+                    split_key: Bindings::after_leader(Key::char('S')),
                     mode: Mode::Regular,
                     command: "$SHELL".into(),
                 },
@@ -182,11 +187,16 @@ impl Config {
             .keys
             .iter()
             .map(|(&action, keys)| (format!("keys.{}", action.name()), keys, Some(action)))
-            .chain(
-                self.tabs
-                    .iter()
-                    .map(|tab| (format!("tab {:?}", tab.name), &tab.key, None)),
-            )
+            .chain(self.tabs.iter().flat_map(|tab| {
+                [
+                    (format!("tab {:?}", tab.name), &tab.key, None),
+                    (
+                        format!("tab {:?} split_key", tab.name),
+                        &tab.split_key,
+                        None,
+                    ),
+                ]
+            }))
             .collect();
         for (i, (owner, keys, action)) in owners.iter().enumerate() {
             for &binding in &keys.0 {
@@ -242,6 +252,8 @@ mod tests {
         let config = Config::parse(include_str!("../../../config/example.toml")).unwrap();
         let names: Vec<&str> = config.tabs.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["review", "shell", "git"]);
+        // As the default tabs have them.
+        assert_eq!(config.tabs[..2], Config::default().tabs);
         assert_eq!(config.slide_ms, 150);
         assert!(config.worktree);
         assert!(config.plan);
@@ -306,6 +318,7 @@ mod tests {
             vec![TabDef {
                 name: "top".into(),
                 key: Bindings::default(),
+                split_key: Bindings::default(),
                 mode: Mode::Lazy,
                 command: "htop".into(),
             }]
@@ -328,7 +341,8 @@ mod tests {
     fn keys_take_lists_and_keep_the_defaults_of_the_others() {
         let config = Config::parse(
             "[keys]\nfind = [\"<leader>f\", \"<C-f>\"]\nsession_1 = \"<A-1>\"\nquit = []\n\
-             [[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = [\"<leader>r\", \"<A-r>\"]",
+             [[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = [\"<leader>r\", \"<A-r>\"]\n\
+             split_key = [\"<leader>R\", \"<A-R>\"]",
         )
         .unwrap();
         let keys =
@@ -338,6 +352,9 @@ mod tests {
         assert_eq!(config.keys[&Action::Quit], keys(&[]));
         assert_eq!(config.keys[&Action::Merge], keys(&["<leader>m"]));
         assert_eq!(config.tabs[0].key, keys(&["<leader>r", "<A-r>"]));
+        assert_eq!(config.tabs[0].split_key, keys(&["<leader>R", "<A-R>"]));
+        assert_eq!(config.keys[&Action::ChatSplit], keys(&["<leader>C"]));
+        assert_eq!(config.keys[&Action::OtherPane], keys(&["<leader>o"]));
         // Enter does one thing in Chat, another in a terminal tab: so can any key.
         assert!(
             Config::parse("[keys]\nsubmit_and_stay = \"<A-x>\"\nrerun_tab = \"<A-x>\"").is_ok()
@@ -373,6 +390,12 @@ mod tests {
             tab("\"<leader><C-Space>\""),
             tab("\"<C-Space>\""),
             tab("3"),
+            // A split key of its own, or taken: by an action, by the tab's own key.
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nsplit_key = \"R\"".to_owned(),
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nsplit_key = \"<leader>C\"".to_owned(),
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nsplit_key = \"<leader>o\"".to_owned(),
+            "[[tab]]\nname = \"a\"\ncommand = \"x\"\nkey = \"<A-a>\"\nsplit_key = \"<A-a>\""
+                .to_owned(),
             format!("{}\n{}", tab("\"<leader>d\""), tab("\"<leader>d\"")),
             "[keys]\nfind = \"f\"".to_owned(),
             "[keys]\nfind = \"<leader>q\"".to_owned(),

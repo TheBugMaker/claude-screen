@@ -69,6 +69,7 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] Tab modes: `eager`, `lazy`, `regular`
 - [ ] Tab modes: `on_demand`, `on_change` (re-run when Claude edits files), `on_idle`
 - [x] Leader key, then `c` / the tab's own key / `[` `]` to switch tabs
+- [x] Two tabs side by side: leader `C` / the tab's `split_key` (`R`, `S`) puts it beside the one on screen, leader `o` or a click types in the other
 - [x] Every key in the config, written as vim writes them: after the leader (`<leader>f`) or on its own with Ctrl or Alt (`<C-f>`, `<A-1>`), several for one action
 - [x] Resize tabs with the window, including hidden ones
 - [x] Review tab: runs a preconfigured command, by default `git diff`
@@ -98,8 +99,9 @@ ccs --resume <SESSION_ID> # resume a past Claude Code session in its directory
 | `/exit`, or Ctrl-C twice, in Claude | Closes the session and its tabs; after the last one, ccs exits. If Claude failed, ccs says how |
 | Any key in a terminal tab | Goes to the program, Ctrl-C included |
 | Enter (in a tab whose command exited) | Run it again |
-| Mouse wheel | Scroll Claude's transcript, or a terminal tab's output |
+| Mouse wheel | Scroll Claude's transcript, or a terminal tab's output; the one under the pointer when two are side by side |
 | Click a session or a tab | Go to it |
+| Click one of two tabs side by side | Type there |
 | Scroll sideways (touchpad swipe), or Shift+scroll | Go to the previous / next session, one per swipe |
 
 Everything else starts with the leader, Ctrl-Space, then one key. These are the defaults: the config changes any of them, and can give each a Ctrl or Alt key that works without the leader (see below).
@@ -112,14 +114,16 @@ Everything else starts with the leader, Ctrl-Space, then one key. These are the 
 | `n` / `N` | Open a new session in this project: in a worktree of its own (unless `worktree = false`) / in the main checkout, without a worktree |
 | `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. A past session from a worktree says `merged` once the reflog of the main checkout's branch shows the session's branch merged in, and `not merged` while the session's branch has commits that one doesn't (merges made in this clone only, as far back as the reflog goes). Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
 | `m` | Commit and merge the session's work: see [Merging a session](#merging-a-session) |
-| `c` / a tab's key | Go to the Chat tab / that tab |
+| `c` / a tab's key | Go to the Chat tab / that tab, on its own |
+| `C` / a tab's split key (`R` review, `S` shell) | Show Chat / that tab beside the one on screen, and type there. Chat goes on the left. With two on screen, it takes the place of the one on the right, or goes if it is one of them. On screen alone, Chat comes beside it |
+| `o` | With two tabs side by side: type in the other one |
 | `[` / `]` | Previous / next tab |
 | Enter | In the Chat tab: submit the prompt, then open a new session in the main checkout, without a worktree, even if another one is waiting. In a terminal tab: run the tab's command again, stopping it first if it is still running |
 | `w` | In the Chat tab: submit the prompt and stay |
 | `q` | Quit. While a merge runs, it takes `q` again |
 | Ctrl-Space | Send Ctrl-Space to the program in the tab, Claude included |
 
-Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time you open it, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. New sessions start in Claude's plan mode (`claude --permission-mode plan`); `plan = false` turns that off. Keys are written as vim writes them, starting with the leader: `leader = "<C-a>"`. Under `[keys]`, each action (`find`, `quit`, `session_1`, … all listed in the example) takes one key or a list of them, after the leader (`"<leader>f"`) or on its own with Ctrl or Alt (`"<C-f>"`, `"<A-1>"`); a tab's `key` takes the same. A key without the leader goes to ccs rather than to Claude or the program in the tab, so `session_1 = ["<leader>1", "<A-1>"]` keeps the leader's way and adds Alt-1. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long it takes per 100 columns, so every width slides at the same speed, and `slide_ms = 0` switches at once.
+Tabs come from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml)); without one, every session gets a `review` tab (`git diff`), run again every time it comes on screen, and a `shell` tab (`$SHELL`), started in the background with the session. Tab commands run in the session's directory and get `CS_*` variables such as `$CS_CWD` and `$CS_GIT_BASE` (listed in the example). Each new session works in its own git worktree and branch, made by `claude --worktree`, and its tabs run there; `worktree = false` turns that off. New sessions start in Claude's plan mode (`claude --permission-mode plan`); `plan = false` turns that off. Keys are written as vim writes them, starting with the leader: `leader = "<C-a>"`. Under `[keys]`, each action (`find`, `quit`, `session_1`, … all listed in the example) takes one key or a list of them, after the leader (`"<leader>f"`) or on its own with Ctrl or Alt (`"<C-f>"`, `"<A-1>"`); a tab's `key` and `split_key` take the same. A key without the leader goes to ccs rather than to Claude or the program in the tab, so `session_1 = ["<leader>1", "<A-1>"]` keeps the leader's way and adds Alt-1. Switching sessions slides the new one in from the side its chip is on; `slide_ms = 150` sets how long it takes per 100 columns, so every width slides at the same speed, and `slide_ms = 0` switches at once.
 
 Each session is a plain `claude` with your own settings and plugins; ccs only adds its mods, and starts a new session in plan mode. Resumed sessions keep your own permission mode. ccs loads them from this repository's `mods`, so a ccs binary needs its source tree for now. Start ccs from your own terminal rather than from inside a Claude Code session, whose `CLAUDE_CODE_*` variables would reach the sessions.
 

@@ -15,7 +15,7 @@
 # command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
 #
 # Modes:
-#   eager      run every time the tab is opened
+#   eager      run every time the tab comes on screen
 #   lazy       run the first time the tab is opened (the default)
 #   regular    run in the background when the session starts, so it is up before the tab
 #              is opened
@@ -80,6 +80,8 @@ new_session_no_worktree = "<leader>N"
 find = "<leader>f"                      # find a session, open or past
 merge = "<leader>m"                     # commit and merge the session's work: see [[merge]]
 chat = "<leader>c"                      # go to the Chat tab
+chat_split = "<leader>C"                # show Chat beside the tab on screen: see [[tab]]
+other_pane = "<leader>o"                # in a split, give your keys to the other side
 previous_tab = "<leader>["
 next_tab = "<leader>]"
 rerun_tab = "<leader><CR>"              # in a terminal tab: run its command again
@@ -89,22 +91,33 @@ quit = "<leader>q"
 # For example, Alt and a digit go to a session as well as the leader and the digit:
 # session_1 = ["<leader>1", "<A-1>"]
 
-# A tab's key goes to it: one key or a list, as in [keys].
+# A tab's key goes to it: one key or a list, as in [keys]. Its split_key shows it beside the
+# tab on screen instead, and gives it your keys:
+#
+#   - Chat is on the left whenever it is one of the two
+#   - with two on screen already, it takes the place of the one on the right
+#   - if it is one of the two, it goes, and the other one has the screen
+#   - if it is on screen alone, Chat comes beside it
+#
+# Click a side, or press other_pane, to type there. Its key, or Chat's, shows it alone again.
 [[tab]]
 name = "review"
 key = "<leader>r"
+split_key = "<leader>R"
 mode = "eager"
 command = "git diff"
 
 [[tab]]
 name = "shell"
 key = "<leader>s"
+split_key = "<leader>S"
 mode = "regular"
 command = "$SHELL"
 
 [[tab]]
 name = "git"
 key = ["<leader>g", "<A-g>"]
+split_key = "<leader>G"
 command = "lazygit"
 
 # Leader m gets the session's work into its target. A panel shows what will happen and asks

@@ -35,8 +35,8 @@ Without the leader:
 - Any key in the Chat tab goes to Claude, Ctrl-C included.
 - Any key in a terminal tab goes to its program, Ctrl-C included.
 - Enter, in a tab whose command exited, runs the command again.
-- The mouse wheel scrolls Claude's transcript or a tab's output.
-- A click on a session or a tab goes to it.
+- The mouse wheel scrolls Claude's transcript or a tab's output. With two tabs side by side, it scrolls the one under the pointer.
+- A click on a session or a tab goes to it. A click on one of two tabs side by side sends the keys there.
 - A sideways scroll (touchpad swipe), or Shift and the wheel, goes to the previous or next session, one per swipe.
 
 The leader is Ctrl-Space. Press it, then one key:
@@ -50,15 +50,17 @@ The leader is Ctrl-Space. Press it, then one key:
 | `N` | New session in the main checkout, without a worktree |
 | `f` | Find a session, open or past |
 | `m` | Commit and merge the session's work |
-| `c` | Go to the Chat tab |
-| a tab's key (`r` review, `s` shell by default) | Go to that tab |
+| `c` | Go to the Chat tab, on its own |
+| a tab's key (`r` review, `s` shell by default) | Go to that tab, on its own |
+| `C` / a tab's split key (`R` review, `S` shell by default) | Show Chat / that tab beside the one on screen, with the keys. Chat goes on the left. With two on screen, it takes the place of the one on the right, or goes if it's one of them. On screen alone, Chat comes beside it |
+| `o` | With two tabs side by side: send the keys to the other one |
 | `[` / `]` | Previous / next tab |
 | Enter | In Chat: submit, then open a new session without a worktree. In a terminal tab: run its command again, stopping it first if it still runs |
 | `w` | In Chat: submit and stay |
 | `q` | Quit ccs. While a merge runs, press `q` again |
 | Ctrl-Space | Send Ctrl-Space itself to the program in the tab, Claude included |
 
-Rebinding goes under `[keys]` in the config. Each action (`session_1` … `session_9`, `previous_session`, `next_session`, `new_session`, `new_session_no_worktree`, `find`, `merge`, `chat`, `previous_tab`, `next_tab`, `rerun_tab`, `submit_and_new_session`, `submit_and_stay`, `quit`) takes one key or a list. Keys are written the way vim writes them:
+Rebinding goes under `[keys]` in the config. Each action (`session_1` … `session_9`, `previous_session`, `next_session`, `new_session`, `new_session_no_worktree`, `find`, `merge`, `chat`, `chat_split`, `other_pane`, `previous_tab`, `next_tab`, `rerun_tab`, `submit_and_new_session`, `submit_and_stay`, `quit`) takes one key or a list. Keys are written the way vim writes them:
 
 - `"<leader>f"` is f after the leader.
 - `"<C-f>"` and `"<A-1>"` work on their own, without the leader. A key without the leader needs Ctrl or Alt, because the other keys are typing.
@@ -81,9 +83,9 @@ For example, `session_1 = ["<leader>1", "<A-1>"]` adds Alt-1 and keeps the leade
 
 ## Tabs
 
-Tabs come from `[[tab]]` entries in the config. Each has a `name`, a `key`, a `command` (run with `sh -c` in the session's directory) and a `mode`:
+Tabs come from `[[tab]]` entries in the config. Each has a `name`, a `key`, an optional `split_key`, a `command` (run with `sh -c` in the session's directory) and a `mode`:
 
-- `eager` runs every time the tab is opened. The default `review` tab is eager.
+- `eager` runs every time the tab comes on screen. The default `review` tab is eager.
 - `lazy`, the default mode, runs the first time the tab is opened.
 - `regular` starts in the background with the session, so it's up before the tab is opened. The default `shell` tab is regular.
 

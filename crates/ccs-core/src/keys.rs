@@ -211,6 +211,8 @@ pub enum Action {
     Find,
     Merge,
     Chat,
+    ChatSplit,
+    OtherPane,
     PreviousTab,
     NextTab,
     RerunTab,
@@ -221,7 +223,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order the leader panel lists them; the sessions first.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::Session1,
         Self::Session2,
         Self::Session3,
@@ -238,6 +240,8 @@ impl Action {
         Self::Find,
         Self::Merge,
         Self::Chat,
+        Self::ChatSplit,
+        Self::OtherPane,
         Self::PreviousTab,
         Self::NextTab,
         Self::RerunTab,
@@ -265,6 +269,8 @@ impl Action {
             Self::Find => ("find", Key::char('f')),
             Self::Merge => ("merge", Key::char('m')),
             Self::Chat => ("chat", Key::char('c')),
+            Self::ChatSplit => ("chat_split", Key::char('C')),
+            Self::OtherPane => ("other_pane", Key::char('o')),
             Self::PreviousTab => ("previous_tab", Key::char('[')),
             Self::NextTab => ("next_tab", Key::char(']')),
             Self::RerunTab => ("rerun_tab", Key::ENTER),

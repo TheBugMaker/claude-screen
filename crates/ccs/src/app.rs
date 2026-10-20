@@ -125,10 +125,21 @@ pub struct View {
     last_key: Option<(Instant, Then)>,
     /// Peer tabs, from the config, then the merge tab while there is one.
     pub tabs: Vec<Tab>,
-    /// The tab on screen: 0 is Chat, then `tabs[tab - 1]`.
+    /// The tab that gets your keys: 0 is Chat, then `tabs[tab - 1]`.
     pub tab: usize,
+    /// The two tabs side by side when the screen is split; `tab` is one of them.
+    pub split: Option<Split>,
     /// The last merge of the session's work (leader m).
     merge: Option<MergeRun>,
+}
+
+/// Two tabs side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Split {
+    /// On the left: Chat whenever it is one of the two, else the tab that was on screen alone.
+    pub main: usize,
+    /// On the right: the tab put beside it, whose place a split key takes.
+    pub side: usize,
 }
 
 /// A merge of a session's work: its `[[merge]]` running in a tab, and what came of it.
@@ -193,19 +204,63 @@ impl View {
         self.merge_running() || self.merge.as_ref().is_some_and(|m| m.fixer.is_some())
     }
 
-    /// The terminal on screen: Claude's in the Chat tab, or a peer tab's.
-    pub fn terminal(&self) -> &Tab {
-        match self.tab.checked_sub(1) {
+    /// Tab `tab`: 0 is Chat, then `tabs[tab - 1]`.
+    pub fn tab_at(&self, tab: usize) -> &Tab {
+        match tab.checked_sub(1) {
             Some(index) => &self.tabs[index],
             None => &self.claude,
         }
     }
 
-    fn terminal_mut(&mut self) -> &mut Tab {
-        match self.tab.checked_sub(1) {
+    fn tab_at_mut(&mut self, tab: usize) -> &mut Tab {
+        match tab.checked_sub(1) {
             Some(index) => &mut self.tabs[index],
             None => &mut self.claude,
         }
+    }
+
+    /// The terminal that gets your keys: Claude's in the Chat tab, or a peer tab's.
+    pub fn terminal(&self) -> &Tab {
+        self.tab_at(self.tab)
+    }
+
+    fn terminal_mut(&mut self) -> &mut Tab {
+        self.tab_at_mut(self.tab)
+    }
+
+    /// The tabs on screen, from the left: the two of the split, else the one with your keys.
+    pub fn shown(&self) -> Vec<usize> {
+        match self.split {
+            Some(split) => vec![split.main, split.side],
+            None => vec![self.tab],
+        }
+    }
+
+    /// The size (rows, columns) of tab `tab` in a window of `window`: its side's when the screen
+    /// is split, else all of it, as when it is out of sight.
+    fn size(&self, tab: usize, window: Rect) -> (u16, u16) {
+        let shown = self.shown();
+        match shown.iter().position(|&t| t == tab) {
+            Some(pane) => ui::size(ui::pane_areas(window, shown.len())[pane]),
+            None => ui::terminal_size(window),
+        }
+    }
+
+    /// Sizes the terminal of every tab to where it is drawn in a window of `window`.
+    fn fit(&mut self, window: Rect) {
+        for tab in 0..=self.tabs.len() {
+            let size = self.size(tab, window);
+            if let Some(pty) = &mut self.tab_at_mut(tab).pty {
+                pty.resize(size);
+            }
+        }
+    }
+
+    /// Gives Chat your keys: beside the tab it is split with, else on its own.
+    fn focus_chat(&mut self, window: Rect) {
+        self.split.take_if(|split| split.main != 0);
+        self.tab = 0;
+        self.fit(window);
     }
 
     /// The variables of the session's tabs. Each is set, empty when unknown, so that none comes
@@ -234,20 +289,23 @@ impl View {
         ]
     }
 
-    /// Runs the command of `tabs[index]`, again if it ran before. Its events come with `key`.
-    fn start_tab(&mut self, index: usize, key: u64, size: (u16, u16), ptys: ccs_term::EventSender) {
+    /// Runs the command of `tabs[index]`, again if it ran before, at its size in a window of
+    /// `window`. Its events come with `key`.
+    fn start_tab(&mut self, index: usize, key: u64, window: Rect, ptys: ccs_term::EventSender) {
         let env = self.tab_env();
+        let size = self.size(index + 1, window);
         self.tabs[index].start(&self.cwd, &env, key, size, ptys);
     }
 
-    /// Runs the regular tabs that haven't run yet, and the tab on screen if it never ran. Their
+    /// Runs the regular tabs that haven't run yet, and the tabs on screen if they never ran. Their
     /// keys come from `keys`.
-    fn start_tabs(&mut self, keys: &mut u64, size: (u16, u16), ptys: &ccs_term::EventSender) {
+    fn start_tabs(&mut self, keys: &mut u64, window: Rect, ptys: &ccs_term::EventSender) {
+        let shown = self.shown();
         for index in 0..self.tabs.len() {
             let tab = &self.tabs[index];
             let never_ran = tab.pty.is_none() && tab.error.is_none();
-            if never_ran && (tab.def.mode == Mode::Regular || self.tab == index + 1) {
-                self.start_tab(index, *keys, size, ptys.clone());
+            if never_ran && (tab.def.mode == Mode::Regular || shown.contains(&(index + 1))) {
+                self.start_tab(index, *keys, window, ptys.clone());
                 *keys += 1;
             }
         }
@@ -260,7 +318,7 @@ impl View {
         &mut self,
         event: Bridge,
         keys: &mut u64,
-        size: (u16, u16),
+        window: Rect,
         ptys: &ccs_term::EventSender,
     ) -> bool {
         let ready = matches!(event, Bridge::Ready { .. });
@@ -281,7 +339,7 @@ impl View {
         if self.waiting {
             self.waiting = false;
             self.cwd = root;
-            self.start_tabs(keys, size, ptys);
+            self.start_tabs(keys, window, ptys);
         }
         false
     }
@@ -303,8 +361,10 @@ enum Then {
 #[derive(Clone, Copy)]
 enum Command {
     Action(Action),
-    /// Shows a tab: 0 is Chat.
+    /// Shows a tab on its own: 0 is Chat.
     Tab(usize),
+    /// Shows a tab beside the one on screen, or takes it off the screen.
+    Split(usize),
 }
 
 /// A worktree ccs asked Claude to make: `claude --worktree <name>`.
@@ -534,6 +594,7 @@ impl App {
             last_key: None,
             tabs: Vec::new(),
             tab: 0,
+            split: None,
             merge: None,
         };
         self.peer_tabs(&mut view);
@@ -556,11 +617,7 @@ impl App {
             })
             .collect();
         if !view.waiting {
-            view.start_tabs(
-                &mut self.next_key,
-                ui::terminal_size(self.window),
-                &self.ptys,
-            );
+            view.start_tabs(&mut self.next_key, self.window, &self.ptys);
         }
     }
 
@@ -572,26 +629,90 @@ impl App {
         }
         let key = self.next_key;
         self.next_key += 1;
-        let size = ui::terminal_size(self.window);
-        self.views[view].start_tab(index, key, size, self.ptys.clone());
+        self.views[view].start_tab(index, key, self.window, self.ptys.clone());
     }
 
-    /// Shows tab `tab` of the session on screen (0 is Chat). Runs its command the first time,
-    /// and every time you switch to it if it is eager.
+    /// Shows tab `tab` of the session on screen on its own (0 is Chat), with your keys.
     fn select_tab(&mut self, tab: usize) {
         let view = &mut self.views[self.active];
         if tab > view.tabs.len() {
             return;
         }
-        let switched = view.tab != tab;
+        let before = view.shown();
         view.tab = tab;
-        if let Some(index) = tab.checked_sub(1) {
-            let peer = &view.tabs[index];
+        view.split = None;
+        self.came_on_screen(&before);
+    }
+
+    /// Shows tab `tab` of the session on screen beside the one there, with your keys. With two on
+    /// screen, it takes the place of the one on the right, or goes if it is one of them. On screen
+    /// alone, Chat comes beside it instead. Chat is always on the left.
+    fn split_tab(&mut self, tab: usize) {
+        let view = &mut self.views[self.active];
+        if tab > view.tabs.len() {
+            return;
+        }
+        let before = view.shown();
+        // The tab that stays, and the one that comes and gets your keys.
+        let (stays, comes) = match view.split {
+            // It goes, and the other one has the screen.
+            Some(split) if before.contains(&tab) => {
+                view.tab = if tab == split.main {
+                    split.side
+                } else {
+                    split.main
+                };
+                view.split = None;
+                return self.came_on_screen(&before);
+            }
+            Some(split) => (split.main, tab),
+            None if tab != view.tab => (view.tab, tab),
+            None if tab != 0 => (tab, 0),
+            // Chat beside itself.
+            None => return,
+        };
+        view.tab = comes;
+        view.split = Some(if comes == 0 {
+            Split {
+                main: comes,
+                side: stays,
+            }
+        } else {
+            Split {
+                main: stays,
+                side: comes,
+            }
+        });
+        self.came_on_screen(&before);
+    }
+
+    /// Gives your keys to the other tab on screen, when there are two.
+    fn other_pane(&mut self) {
+        let view = &mut self.views[self.active];
+        if let Some(split) = view.split {
+            view.tab = if view.tab == split.main {
+                split.side
+            } else {
+                split.main
+            };
+        }
+    }
+
+    /// The tabs of the session on screen have changed from `before` (`View::shown`). Runs those on
+    /// screen the first time, and every time one comes on screen if it is eager. Sizes each to
+    /// where it is now.
+    fn came_on_screen(&mut self, before: &[usize]) {
+        for tab in self.views[self.active].shown() {
+            let Some(index) = tab.checked_sub(1) else {
+                continue;
+            };
+            let peer = &self.views[self.active].tabs[index];
             let never_ran = peer.pty.is_none() && peer.error.is_none();
-            if never_ran || (switched && peer.def.mode == Mode::Eager) {
+            if never_ran || (!before.contains(&tab) && peer.def.mode == Mode::Eager) {
                 self.start_tab(self.active, index);
             }
         }
+        self.views[self.active].fit(self.window);
     }
 
     /// Resumes a past session by id, from the directory it ran in.
@@ -678,6 +799,7 @@ impl App {
             def: TabDef {
                 name: "Chat".to_owned(),
                 key: self.config.keys[&Action::Chat].clone(),
+                split_key: Bindings::default(),
                 mode: Mode::Lazy,
                 command: CLAUDE.to_owned(),
             },
@@ -741,7 +863,7 @@ impl App {
             // You go there to answer it, so to its Chat tab.
             Some(index) => {
                 self.active = index;
-                self.views[index].tab = 0;
+                self.views[index].focus_chat(self.window);
             }
             None => self.open_new(true),
         }
@@ -887,7 +1009,7 @@ impl App {
             .find(|l| !l.is_empty())
             .unwrap_or_default()
             .to_owned();
-        let size = ui::terminal_size(self.window);
+        let window = self.window;
         let worktree = view.worktree.take();
         view.waiting = false;
         let key = view.key;
@@ -900,7 +1022,9 @@ impl App {
             Ok(claude) => {
                 let view = &mut self.views[index];
                 view.claude = claude;
-                view.start_tabs(&mut self.next_key, size, &self.ptys);
+                // Started at the size of the whole window, but Chat may be beside a tab.
+                view.fit(window);
+                view.start_tabs(&mut self.next_key, window, &self.ptys);
                 self.notify(format!("no worktree for this session: {why}"));
             }
             Err(err) => self.close(index, &format!("starting it again failed: {err:#}")),
@@ -978,10 +1102,10 @@ impl App {
 
     /// A report of the bridge mod in session `key`'s Claude.
     fn on_bridge(&mut self, key: u64, event: Bridge) {
-        let size = ui::terminal_size(self.window);
+        let window = self.window;
         // Kept, so the spare shows up ready with its id, its tabs in its worktree.
         if let Some(spare) = self.spare.as_mut().filter(|s| s.key == key) {
-            spare.bridge(event, &mut self.next_key, size, &self.ptys);
+            spare.bridge(event, &mut self.next_key, window, &self.ptys);
             return;
         }
         let Some(index) = self.views.iter().position(|v| v.key == key) else {
@@ -992,7 +1116,7 @@ impl App {
         let ready = matches!(event, Bridge::Ready { .. });
         let idle = matches!(event, Bridge::Idle);
         let view = &mut self.views[index];
-        if view.bridge(event, &mut self.next_key, size, &self.ptys) {
+        if view.bridge(event, &mut self.next_key, window, &self.ptys) {
             let cwd = view.cwd.display().to_string();
             let rerun = ui::key_hint(&self.config, Action::RerunTab);
             self.notify(format!(
@@ -1109,20 +1233,31 @@ impl App {
                     }
                     return;
                 }
-                let area = ui::terminal_area(self.window);
                 let view = &mut self.views[self.active];
-                let chat = view.tab == 0;
-                let Some(pty) = &mut view.terminal_mut().pty else {
+                let shown = view.shown();
+                let panes = ui::pane_areas(self.window, shown.len());
+                // The tab under the pointer. Off the tabs, the wheel scrolls the one with your keys.
+                let pane = panes.iter().position(|a| a.contains(at));
+                let tab = pane.map_or(view.tab, |pane| shown[pane]);
+                let click = matches!(mouse.kind, MouseEventKind::Down(_));
+                // A click there gives it your keys too.
+                if pane.is_some() && click {
+                    view.tab = tab;
+                }
+                let Some(pty) = &mut view.tab_at_mut(tab).pty else {
                     return;
                 };
                 // To the program if it asked for the mouse, else the wheel scrolls back.
-                let at_screen = (at.x.saturating_sub(area.x), at.y.saturating_sub(area.y));
-                if area.contains(at) && pty.mouse(mouse.kind, mouse.modifiers, at_screen) {
-                    // A click can answer Claude's permission dialog.
-                    if chat && matches!(mouse.kind, MouseEventKind::Down(_)) {
-                        view.last_key = Some((Instant::now(), Then::Advance));
+                if let Some(pane) = pane {
+                    let area = panes[pane];
+                    let at_screen = (at.x - area.x, at.y - area.y);
+                    if pty.mouse(mouse.kind, mouse.modifiers, at_screen) {
+                        // A click can answer Claude's permission dialog.
+                        if tab == 0 && click {
+                            view.last_key = Some((Instant::now(), Then::Advance));
+                        }
+                        return;
                     }
-                    return;
                 }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => pty.scroll_up(WHEEL_STEP.into()),
@@ -1133,15 +1268,8 @@ impl App {
             // Hidden tabs and the spare too, so a program never draws for the wrong size.
             Event::Resize(width, height) => {
                 self.window = Rect::new(0, 0, width, height);
-                let size = ui::terminal_size(self.window);
-                for pty in self
-                    .views
-                    .iter_mut()
-                    .chain(self.spare.as_mut())
-                    .flat_map(|v| v.tabs.iter_mut().chain([&mut v.claude]))
-                    .filter_map(|t| t.pty.as_mut())
-                {
-                    pty.resize(size);
+                for view in self.views.iter_mut().chain(self.spare.as_mut()) {
+                    view.fit(self.window);
                 }
             }
             _ => {}
@@ -1344,6 +1472,7 @@ impl App {
         let tab_def = TabDef {
             name,
             key: Bindings::default(),
+            split_key: Bindings::default(),
             mode: Mode::Lazy,
             command,
         };
@@ -1370,7 +1499,10 @@ impl App {
         };
         tab.start(&view.cwd, &env, key, size, self.ptys.clone());
         view.tabs.push(tab);
+        // On its own.
         view.tab = view.tabs.len();
+        view.split = None;
+        view.fit(self.window);
         view.merge = Some(MergeRun {
             action,
             tab: key,
@@ -1602,8 +1734,9 @@ impl App {
         }
     }
 
-    /// What `key` does in the tab on screen, after the leader or on its own: go to a peer tab
-    /// whose key it is, or an action that works there. The config keeps them off each other's.
+    /// What `key` does in the tab with your keys, after the leader or on its own: go to a peer tab
+    /// whose key it is, or put it beside, or an action that works there. The config keeps them off
+    /// each other's.
     fn command_for(&self, key: &KeyEvent, after_leader: bool) -> Option<Command> {
         let view = &self.views[self.active];
         let is = |bindings: &Bindings| {
@@ -1614,6 +1747,9 @@ impl App {
         };
         if let Some(index) = view.tabs.iter().position(|t| is(&t.def.key)) {
             return Some(Command::Tab(index + 1));
+        }
+        if let Some(index) = view.tabs.iter().position(|t| is(&t.def.split_key)) {
+            return Some(Command::Split(index + 1));
         }
         let peer = view.tab > 0;
         self.config
@@ -1626,6 +1762,7 @@ impl App {
     fn run_command(&mut self, command: Command) {
         let action = match command {
             Command::Tab(tab) => return self.select_tab(tab),
+            Command::Split(tab) => return self.split_tab(tab),
             Command::Action(action) => action,
         };
         let count = self.views.len();
@@ -1654,6 +1791,8 @@ impl App {
             Action::Merge => self.open_merge(),
             Action::Quit => self.request_quit(),
             Action::Chat => self.select_tab(0),
+            Action::ChatSplit => self.split_tab(0),
+            Action::OtherPane => self.other_pane(),
             Action::PreviousTab => self.select_tab((tab + tabs - 1) % tabs),
             Action::NextTab => self.select_tab((tab + 1) % tabs),
             // Above.
@@ -1967,6 +2106,7 @@ mod tests {
                 def: TabDef {
                     name: "Chat".into(),
                     key: Bindings::after_leader(Key::char('c')),
+                    split_key: Bindings::default(),
                     mode: Mode::Lazy,
                     command: CLAUDE.into(),
                 },
@@ -1978,6 +2118,7 @@ mod tests {
             last_key: None,
             tabs: Vec::new(),
             tab: 0,
+            split: None,
             merge: None,
         }
     }
@@ -2123,6 +2264,7 @@ mod tests {
         TabDef {
             name: name.into(),
             key: Bindings::default(),
+            split_key: Bindings::default(),
             mode,
             command: "cat".into(),
         }
@@ -2162,6 +2304,122 @@ mod tests {
         app.select_tab(0);
         app.select_tab(3);
         assert_ne!(keys(&app)[2], eager);
+    }
+
+    /// An app showing a session with the default tabs, review (eager) and shell (regular), whose
+    /// commands wait for input, in a window of 80 by 24.
+    fn app_with_default_tabs() -> App {
+        let mut app = app();
+        app.window = Rect::new(0, 0, 80, 24);
+        app.config.tabs = Config::default()
+            .tabs
+            .into_iter()
+            .map(|def| TabDef {
+                command: "cat".into(),
+                ..def
+            })
+            .collect();
+        let mut view = view(0, std::env::temp_dir());
+        app.peer_tabs(&mut view);
+        app.views.push(view);
+        app
+    }
+
+    /// The tab with the keys of the session on screen, and its split: left, right.
+    fn layout(app: &App) -> (usize, Option<(usize, usize)>) {
+        let view = &app.views[app.active];
+        (view.tab, view.split.map(|split| (split.main, split.side)))
+    }
+
+    #[test]
+    fn split_keys_put_a_tab_beside_another() {
+        let mut app = app_with_default_tabs();
+        // Tabs: 0 is Chat, 1 review, 2 shell. Each run of review gives it a new key.
+        let review = |app: &App| app.views[0].tabs[0].key;
+        let key = |app: &mut App, c| leader_key(app, KeyCode::Char(c));
+        key(&mut app, 'R');
+        assert_eq!(layout(&app), (1, Some((0, 1))));
+        let first = review(&app);
+        assert!(app.views[0].tabs[0].pty.is_some());
+        // Again: it goes.
+        key(&mut app, 'R');
+        assert_eq!(layout(&app), (0, None));
+        // Coming back runs the eager tab again; shell takes its place on the right.
+        key(&mut app, 'R');
+        let second = review(&app);
+        assert_ne!(second, first);
+        key(&mut app, 'S');
+        assert_eq!(layout(&app), (2, Some((0, 2))));
+        key(&mut app, 'o');
+        assert_eq!(layout(&app), (0, Some((0, 2))));
+        // The plain key: on its own.
+        key(&mut app, 'r');
+        assert_eq!(layout(&app), (1, None));
+        let third = review(&app);
+        assert_ne!(third, second);
+        key(&mut app, 'S');
+        assert_eq!(layout(&app), (2, Some((1, 2))));
+        // Chat takes the right's place, on the left.
+        key(&mut app, 'C');
+        assert_eq!(layout(&app), (0, Some((0, 1))));
+        key(&mut app, 'C');
+        assert_eq!(layout(&app), (1, None));
+        // On screen alone: Chat comes beside it.
+        key(&mut app, 'R');
+        assert_eq!(layout(&app), (0, Some((0, 1))));
+        key(&mut app, 'o');
+        assert_eq!(layout(&app), (1, Some((0, 1))));
+        // Review never left the screen, so it didn't run again.
+        key(&mut app, 'r');
+        assert_eq!(layout(&app), (1, None));
+        assert_eq!(review(&app), third);
+        key(&mut app, 'c');
+        assert_eq!(layout(&app), (0, None));
+        // Chat beside itself is nothing.
+        key(&mut app, 'C');
+        assert_eq!(layout(&app), (0, None));
+    }
+
+    #[test]
+    fn split_tabs_take_half_the_window_and_a_click_gives_one_the_keys() {
+        let mut app = app_with_default_tabs();
+        leader_key(&mut app, KeyCode::Char('R'));
+        let view = &app.views[0];
+        // The rule between the two takes a column. Hidden tabs keep the whole window.
+        assert_eq!(view.size(0, app.window), (21, 40));
+        assert_eq!(view.size(1, app.window), (21, 39));
+        assert_eq!(view.size(2, app.window), (21, 80));
+        click(&mut app, 10, 5);
+        assert_eq!(layout(&app), (0, Some((0, 1))));
+        click(&mut app, 60, 5);
+        assert_eq!(layout(&app), (1, Some((0, 1))));
+        // Neither the rule nor the bars.
+        click(&mut app, 40, 5);
+        click(&mut app, 10, 23);
+        assert_eq!(layout(&app), (1, Some((0, 1))));
+    }
+
+    #[test]
+    fn advancing_keeps_a_split_with_chat() {
+        let mut app = app_with_default_tabs();
+        let mut other = view(1, std::env::temp_dir());
+        app.peer_tabs(&mut other);
+        app.views.push(other);
+        for view in &mut app.views {
+            view.session.bridge(Bridge::Ready {
+                session_id: "5c1c".into(),
+                root: std::env::temp_dir(),
+            });
+        }
+        app.views[1].tab = 1;
+        app.views[1].split = Some(Split { main: 0, side: 1 });
+        app.advance();
+        assert_eq!((app.active, layout(&app)), (1, (0, Some((0, 1)))));
+        // Without Chat, Chat comes on its own.
+        app.views[0].tab = 2;
+        app.views[0].split = Some(Split { main: 1, side: 2 });
+        app.advance();
+        assert_eq!((app.active, layout(&app)), (0, (0, None)));
     }
 
     /// A directory for tabs to run in.
@@ -2927,6 +3185,13 @@ mod tests {
         assert_eq!(run_git(&tree, &["log", "-1", "--format=%s"]), "Add b");
         leader_key(&mut app, KeyCode::Char('q'));
         assert!(app.quit);
+        // Beside Chat, the merge tab gives way to the next merge, on its own.
+        leader_key(&mut app, KeyCode::Char('C'));
+        assert_eq!(layout(&app), (0, Some((0, 1))));
+        leader_key(&mut app, KeyCode::Char('m'));
+        app.on_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(layout(&app), (1, None));
+        assert_ne!(app.views[0].tabs[0].key, key);
         std::fs::remove_dir_all(&repo).unwrap();
     }
 }
