@@ -128,12 +128,12 @@ Claude Code keeps a session that works in a worktree out of the main checkout: i
 
 1. A panel shows the branch and where it goes (the branch checked out in the main checkout), its commits, and the files not committed yet. When there are some, it asks for a commit message, prefilled with the session's title (Ctrl-J, or Shift-Enter where your terminal reports it, for a new line). With several `[[merge]]` actions, Tab picks one. Enter runs it, Esc cancels.
 2. The action runs in a tab of the session: first its `commit` (by default `git add -A && git commit -m "$CS_MESSAGE"`) when there is something to commit, then its `command`. The default command merges the session's branch in the main checkout, if that has no uncommitted changes. A session that works on that branch itself, without a worktree, only commits.
-3. When the command exits 0, the session closes and its worktree goes, if nothing in it would be lost. After the last session, a new one opens.
+3. When the command exits 0, the session closes and its worktree goes, if nothing in it would be lost. If you were on it, you go on as after submitting a prompt: to the session that needs you most, or to a new one.
 4. When it stops on conflicts, a Claude that can work where they are gets the action's `on_conflict` prompt.
    - **Conflicts in the main checkout** go to a new **merge session** there, without a worktree.
      - Its Claude resolves the conflicts and stages them, but doesn't commit.
      - You review the result there (its tabs run in the main checkout) and edit what you like. Leader `m` in the merge session then only finishes the merge: it runs `git commit -a --no-edit`, which takes your edits to tracked files too, but not untracked files. It refuses while files are still in conflict.
-     - Once the merge is committed, the merge session closes along with the session merged. If the merge is aborted instead, both stay.
+     - Once the merge is committed, the merge session closes along with the session merged, and you go on as in step 3. If the merge is aborted instead, both stay.
    - **Conflicts in the session's worktree** go to the session's own Claude. These come from an action that merges or rebases onto the main checkout's branch first. You press leader `m` again once it's done.
    - While Claude fixes the conflicts, that session counts as busy, and so does the session merged. If you were on the session merged, you go on to the session that needs you most, or to a new one. Once the fixing Claude waits for you, submitting elsewhere takes you to it before any other session.
 
