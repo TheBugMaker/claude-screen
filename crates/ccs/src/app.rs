@@ -1095,7 +1095,9 @@ impl App {
             ));
         }
         let key = view.key;
-        // After /exit Claude has removed its worktree, or asked; this is for a Claude that crashed.
+        // After /exit Claude has removed its worktree, or asked and you kept it. This is for a Claude
+        // that crashed, and for a kept one whose commits other branches have: Claude counts the
+        // commits since the session started, merged or not.
         self.discard(view);
         self.check_fixer(key, true);
     }

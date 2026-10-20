@@ -50,9 +50,11 @@ leader = "<C-Space>"
 slide_ms = 150
 
 # Each new session works in its own git worktree and branch (`claude --worktree`), so sessions
-# don't change each other's files. Its tabs run there too. Claude removes a worktree with nothing
-# in it when you /exit; ccs does the same when it closes a session another way. Sessions outside
-# git, or before the first commit, get none.
+# don't change each other's files. Its tabs run there too. On /exit, Claude removes a worktree
+# with nothing in it, and asks first when it has changes, commits made since the session started
+# (merged or not), or a /rename name. ccs removes it when it closes a session another way, or when
+# you kept one whose commits are in other branches already, if nothing in it would be lost.
+# Sessions outside git, or before the first commit, get none.
 worktree = true
 
 # A new session starts in Claude's plan mode (`claude --permission-mode plan`): Claude plans and
