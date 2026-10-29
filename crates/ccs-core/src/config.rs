@@ -23,6 +23,19 @@ cd "$CS_REPO"
 git diff --quiet HEAD || { echo "$CS_REPO has uncommitted changes, or an unfinished merge"; exit 1; }
 git merge --no-edit "$CS_BRANCH""#;
 
+/// The variables ccs sets for tabs and `[[merge]]` actions, without their `CS_`: a param can't
+/// take one of these names.
+pub const VARIABLES: [&str; 8] = [
+    "CWD",
+    "REPO",
+    "BRANCH",
+    "REPO_BRANCH",
+    "GIT_BASE",
+    "SESSION_ID",
+    "TITLE",
+    "MESSAGE",
+];
+
 /// What the default `[[merge]]` asks the Claude that fixes its conflicts to do.
 pub const MERGE_ON_CONFLICT: &str = "Merging branch `$CS_BRANCH` into `$CS_REPO_BRANCH` stopped \
 on conflicts in this checkout. Resolve each conflict, keeping what both sides meant, mark each \
@@ -67,17 +80,51 @@ pub struct MergeDef {
     #[serde(default = "merge_commit")]
     pub commit: String,
     /// Run with `sh -c` in the session's directory, with the `CS_*` variables set. Exiting 0 means
-    /// the work is in, and the session closes.
+    /// the work is in, and `after` says what comes next.
     pub command: String,
     /// What to ask Claude when `command` stops on conflicts: `$CS_*` names are filled in. The
     /// session's own Claude gets it for conflicts in its directory, a new merge session in the
     /// main checkout for conflicts there, where leader m then commits the merge. Without it, a
     /// conflict only gets a notice.
     pub on_conflict: Option<String>,
+    /// Values asked for in the panel, each set as `CS_<NAME>` for `commit`, `command` and
+    /// `on_conflict`.
+    #[serde(default)]
+    pub params: Vec<ParamDef>,
+    /// What happens to the session once `command` exited 0.
+    #[serde(default)]
+    pub after: After,
 }
 
 fn merge_commit() -> String {
     MERGE_COMMIT.to_owned()
+}
+
+/// A value a `[[merge]]` asks for, such as a ticket: set as `CS_<NAME>`, trimmed, empty if left
+/// so.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParamDef {
+    /// Lowercase letters, digits and `_`: `ticket` is `CS_TICKET`.
+    pub name: String,
+    /// What the panel shows before it, else the name.
+    pub prompt: Option<String>,
+    /// What it starts with, `$CS_*` names filled in, such as `"$CS_BRANCH"`.
+    pub default: Option<String>,
+}
+
+/// What a `[[merge]]` does to the session once its command exited 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum After {
+    /// The session closes, and its worktree goes if nothing in it would be lost.
+    #[default]
+    Remove,
+    /// The session closes and its worktree stays, to resume it from the finder: for work that
+    /// comes back, as a pull request that is reviewed.
+    Keep,
+    /// The session stays open.
+    Stay,
 }
 
 /// One `[[tab]]`: a command run in a pseudo-terminal.
@@ -136,6 +183,9 @@ struct MergePatch {
     commit: Option<String>,
     command: Option<String>,
     on_conflict: Option<String>,
+    /// Replaces the whole list.
+    params: Option<Vec<ParamDef>>,
+    after: Option<After>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -187,6 +237,8 @@ impl Default for Config {
                 commit: MERGE_COMMIT.into(),
                 command: MERGE_COMMAND.into(),
                 on_conflict: Some(MERGE_ON_CONFLICT.into()),
+                params: Vec::new(),
+                after: After::Remove,
             }],
         }
     }
@@ -274,6 +326,8 @@ impl Config {
                     commit: patch.commit.unwrap_or_else(merge_commit),
                     command,
                     on_conflict: patch.on_conflict,
+                    params: patch.params.unwrap_or_default(),
+                    after: patch.after.unwrap_or_default(),
                 });
                 continue;
             };
@@ -285,6 +339,12 @@ impl Config {
             }
             if patch.on_conflict.is_some() {
                 merge.on_conflict = patch.on_conflict;
+            }
+            if let Some(params) = patch.params {
+                merge.params = params;
+            }
+            if let Some(after) = patch.after {
+                merge.after = after;
             }
         }
         self.tabs
@@ -358,6 +418,28 @@ impl Config {
                 merge.name
             )));
         }
+        for merge in &self.merges {
+            for (i, param) in merge.params.iter().enumerate() {
+                let name = &param.name;
+                let valid = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                let why = if !valid {
+                    "takes lowercase letters, digits and _"
+                } else if VARIABLES.contains(&name.to_ascii_uppercase().as_str()) {
+                    "is a variable ccs sets"
+                } else if merge.params[..i].iter().any(|p| p.name == *name) {
+                    "is there twice"
+                } else {
+                    continue;
+                };
+                return Err(Error::Invalid(format!(
+                    "merge {:?}: param {name:?} {why}",
+                    merge.name
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -415,17 +497,56 @@ mod tests {
                     commit: MERGE_COMMIT.into(),
                     command: "gh pr create --fill".into(),
                     on_conflict: None,
+                    params: Vec::new(),
+                    after: After::Remove,
                 },
                 MergeDef {
                     name: "push".into(),
                     commit: "git commit -am \"$CS_MESSAGE\"".into(),
                     command: "git push".into(),
                     on_conflict: Some("fix it".into()),
+                    params: Vec::new(),
+                    after: After::Remove,
                 },
             ]
         );
         // None at all: leader m says so.
         assert_eq!(Config::parse("merge = []").unwrap().merges, []);
+    }
+
+    #[test]
+    fn merge_actions_take_params_and_what_comes_after() {
+        let config = Config::parse(
+            "[[merge]]\nname = \"mr\"\ncommand = \"x\"\nafter = \"keep\"\n\
+             params = [{ name = \"ticket\", prompt = \"ADO ticket\" }, \
+             { name = \"type_2\", default = \"$CS_TITLE\" }]",
+        )
+        .unwrap();
+        let merge = &config.merges[0];
+        assert_eq!(merge.after, After::Keep);
+        assert_eq!(
+            merge.params,
+            [
+                ParamDef {
+                    name: "ticket".into(),
+                    prompt: Some("ADO ticket".into()),
+                    default: None,
+                },
+                ParamDef {
+                    name: "type_2".into(),
+                    prompt: None,
+                    default: Some("$CS_TITLE".into()),
+                },
+            ]
+        );
+        for (name, after) in [
+            ("remove", After::Remove),
+            ("keep", After::Keep),
+            ("stay", After::Stay),
+        ] {
+            let text = format!("[[merge]]\nname = \"a\"\ncommand = \"x\"\nafter = \"{name}\"");
+            assert_eq!(Config::parse(&text).unwrap().merges[0].after, after);
+        }
     }
 
     #[test]
@@ -574,9 +695,30 @@ mod tests {
                     commit: MERGE_COMMIT.into(),
                     command: "gh pr create --fill".into(),
                     on_conflict: None,
+                    params: Vec::new(),
+                    after: After::Remove,
                 },
             ]
         );
+        // Params replace the list; `after` changes only what it says.
+        let yours = Config::parse(
+            "[[merge]]\nname = \"mr\"\ncommand = \"x\"\nparams = [{ name = \"a\" }, { name = \"b\" }]",
+        )
+        .unwrap();
+        let config = yours
+            .clone()
+            .apply("[[merge]]\nname = \"mr\"\nafter = \"stay\"\nparams = [{ name = \"c\" }]")
+            .unwrap();
+        let merge = &config.merges[0];
+        assert_eq!(merge.after, After::Stay);
+        let names: Vec<&str> = merge.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["c"]);
+        assert_eq!(merge.command, "x");
+        let config = yours
+            .clone()
+            .apply("[[merge]]\nname = \"mr\"\ncommand = \"y\"")
+            .unwrap();
+        assert_eq!(config.merges[0].params, yours.merges[0].params);
         assert!(Config::default().apply("[[merge]]\nname = \"pr\"").is_err());
         assert!(
             Config::default()
@@ -669,8 +811,35 @@ mod tests {
             "[[merge]]\nname = \"a\"\ncommand = \" \"".to_owned(),
             "[[merge]]\nname = \"a\"".to_owned(),
             "[[merge]]\nname = \"a\"\ncommand = \"x\"\nthen = \"keep\"".to_owned(),
+            "[[merge]]\nname = \"a\"\ncommand = \"x\"\nafter = \"close\"".to_owned(),
         ] {
             assert!(Config::parse(&text).is_err(), "accepted: {text}");
         }
+    }
+
+    #[test]
+    fn rejects_bad_params() {
+        let merge = |params: &str| format!("[[merge]]\nname = \"a\"\ncommand = \"x\"\n{params}");
+        for (params, why) in [
+            ("params = [{ name = \"Ticket\" }]", "lowercase"),
+            ("params = [{ name = \"my-ticket\" }]", "lowercase"),
+            ("params = [{ name = \"\" }]", "lowercase"),
+            ("params = [{ name = \"branch\" }]", "ccs sets"),
+            ("params = [{ name = \"title\" }]", "ccs sets"),
+            ("params = [{ name = \"t\" }, { name = \"t\" }]", "twice"),
+        ] {
+            let text = merge(params);
+            let Err(Error::Invalid(err)) = Config::parse(&text) else {
+                panic!("accepted: {text}");
+            };
+            assert!(err.contains("merge \"a\"") && err.contains(why), "{err}");
+        }
+        assert!(Config::parse(&merge("params = [{ name = \"t\", picker = \"x\" }]")).is_err());
+        // A project's param is checked too.
+        assert!(
+            Config::default()
+                .apply("[[merge]]\nname = \"merge\"\nparams = [{ name = \"cwd\" }]")
+                .is_err()
+        );
     }
 }

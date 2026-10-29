@@ -29,11 +29,23 @@ pub struct MergePanel {
     pub message: Input,
     /// The `[[merge]]` to run, by its place in the config.
     pub action: usize,
+    /// What its `params` ask for.
+    pub params: Vec<Param>,
+    /// The field that gets your keys: the message, or `params[i]`.
+    pub focus: Option<usize>,
     /// Enter was pressed with changes to commit, but no message.
     pub needs_message: bool,
     /// It finishes the merge of another session, whose conflicts this one fixed: it commits it,
     /// with git's message.
     pub finish: bool,
+}
+
+/// A value the action picked in the panel asks for: one of its `params`.
+pub struct Param {
+    pub name: String,
+    /// What the panel shows before it.
+    pub label: String,
+    pub input: Input,
 }
 
 impl MergePanel {
@@ -47,6 +59,60 @@ impl MergePanel {
     /// it finishes a merge.
     pub fn commit_message(&self) -> Option<&str> {
         (!self.finish && !self.changes.is_empty()).then(|| self.message.text().trim())
+    }
+
+    /// Asks for what `def` takes, its defaults filled in from `vars`. A param the action before
+    /// had too keeps what was typed in it. The field that had your keys keeps them if it is still
+    /// there.
+    pub fn set_params(&mut self, def: &MergeDef, vars: &[(String, String)]) {
+        let old = std::mem::take(&mut self.params);
+        self.params = def
+            .params
+            .iter()
+            .map(|param| {
+                let mut input = Input::default();
+                match old.iter().find(|o| o.name == param.name) {
+                    Some(old) => input.insert(old.input.text()),
+                    None => input.insert(&expand(param.default.as_deref().unwrap_or(""), vars)),
+                }
+                Param {
+                    name: param.name.clone(),
+                    label: param.prompt.clone().unwrap_or_else(|| param.name.clone()),
+                    input,
+                }
+            })
+            .collect();
+        let gone = match self.focus {
+            Some(i) => i >= self.params.len(),
+            None => self.commit_message().is_none(),
+        };
+        if gone {
+            self.focus = (self.commit_message().is_none() && !self.params.is_empty()).then_some(0);
+        }
+    }
+
+    /// Gives your keys to the next field, or the one before: the message when there is one,
+    /// then the params.
+    pub fn move_focus(&mut self, back: bool) {
+        let message = usize::from(self.commit_message().is_some());
+        let fields = message + self.params.len();
+        if fields == 0 {
+            return;
+        }
+        let at = self.focus.map_or(0, |i| message + i);
+        let next = (if back { at + fields - 1 } else { at + 1 }) % fields;
+        self.focus = next.checked_sub(message);
+    }
+
+    /// `CS_<NAME>` for each param, set to what was typed, trimmed.
+    pub fn param_vars(&self) -> Vec<(String, String)> {
+        self.params
+            .iter()
+            .map(|p| {
+                let name = format!("CS_{}", p.name.to_ascii_uppercase());
+                (name, p.input.text().trim().to_owned())
+            })
+            .collect()
     }
 }
 
@@ -101,7 +167,7 @@ pub fn script(def: &MergeDef, commit: bool) -> String {
 
 /// `text` with each `$NAME` or `${NAME}` of `vars` replaced by its value. Any other `$` stays as
 /// it is: the text is a prompt, never run.
-pub fn expand(text: &str, vars: &[(&str, String)]) -> String {
+pub fn expand(text: &str, vars: &[(String, String)]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('$') {
@@ -120,7 +186,7 @@ pub fn expand(text: &str, vars: &[(&str, String)]) -> String {
 
 /// The value of the variable of `vars` that `text` starts with, as `NAME` or `{NAME}`, and the
 /// text after it.
-fn variable<'a>(text: &'a str, vars: &'a [(&str, String)]) -> Option<(&'a str, &'a str)> {
+fn variable<'a>(text: &'a str, vars: &'a [(String, String)]) -> Option<(&'a str, &'a str)> {
     let (name, after) = if let Some(braced) = text.strip_prefix('{') {
         braced.split_once('}')?
     } else {
@@ -135,6 +201,8 @@ fn variable<'a>(text: &'a str, vars: &'a [(&str, String)]) -> Option<(&'a str, &
 
 #[cfg(test)]
 mod tests {
+    use ccs_core::config::{After, ParamDef};
+
     use super::*;
 
     #[test]
@@ -175,6 +243,8 @@ mod tests {
             commit: "git commit -am \"$CS_MESSAGE\"".into(),
             command: "set -e\ngit merge x".into(),
             on_conflict: None,
+            params: Vec::new(),
+            after: After::Remove,
         };
         assert_eq!(script(&def, false), "set -e\ngit merge x");
         let both = script(&def, true);
@@ -206,8 +276,8 @@ mod tests {
     #[test]
     fn expands_only_the_names_it_has() {
         let vars = [
-            ("CS_BRANCH", "worktree-ccs-1".to_owned()),
-            ("CS_REPO_BRANCH", "main".to_owned()),
+            ("CS_BRANCH".to_owned(), "worktree-ccs-1".to_owned()),
+            ("CS_REPO_BRANCH".to_owned(), "main".to_owned()),
         ];
         assert_eq!(
             expand(
@@ -223,5 +293,97 @@ mod tests {
         );
         // A longer name isn't a shorter one.
         assert_eq!(expand("$CS_BRANCHES", &vars), "$CS_BRANCHES");
+    }
+
+    fn panel(changes: &[&str]) -> MergePanel {
+        MergePanel {
+            view: 0,
+            branch: "worktree-ccs-1".into(),
+            target: Some("main".into()),
+            changes: changes.iter().map(|&c| c.to_owned()).collect(),
+            ahead: 1,
+            others: 0,
+            message: Input::default(),
+            action: 0,
+            params: Vec::new(),
+            focus: None,
+            needs_message: false,
+            finish: false,
+        }
+    }
+
+    fn action(params: &[(&str, Option<&str>)]) -> MergeDef {
+        MergeDef {
+            name: "mr".into(),
+            commit: String::new(),
+            command: "x".into(),
+            on_conflict: None,
+            params: params
+                .iter()
+                .map(|&(name, default)| ParamDef {
+                    name: name.into(),
+                    prompt: (name == "ticket").then(|| "ADO ticket".into()),
+                    default: default.map(str::to_owned),
+                })
+                .collect(),
+            after: After::Remove,
+        }
+    }
+
+    #[test]
+    fn params_start_from_their_defaults_and_keep_what_was_typed() {
+        let vars = [("CS_TITLE".to_owned(), "Fix login".to_owned())];
+        let mut panel = panel(&[]);
+        panel.set_params(
+            &action(&[("ticket", None), ("title", Some("$CS_TITLE!"))]),
+            &vars,
+        );
+        let labels: Vec<&str> = panel.params.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["ADO ticket", "title"]);
+        assert_eq!(panel.params[1].input.text(), "Fix login!");
+        // Nothing to commit: the keys go to the first param.
+        assert_eq!(panel.focus, Some(0));
+        panel.params[0].input.insert(" 123 ");
+        assert_eq!(
+            panel.param_vars(),
+            [
+                ("CS_TICKET".to_owned(), "123".to_owned()),
+                ("CS_TITLE".to_owned(), "Fix login!".to_owned()),
+            ]
+        );
+        // Another action with a ticket keeps it; the focus was on a field that is gone.
+        panel.focus = Some(1);
+        panel.set_params(&action(&[("type", Some("feat")), ("ticket", None)]), &vars);
+        assert_eq!(panel.params[0].input.text(), "feat");
+        assert_eq!(panel.params[1].input.text(), " 123 ");
+        assert_eq!(panel.focus, Some(1));
+        panel.set_params(&action(&[]), &vars);
+        assert_eq!(panel.focus, None);
+    }
+
+    #[test]
+    fn the_focus_goes_round_the_message_and_the_params() {
+        let mut panel = panel(&[" M a.rs"]);
+        panel.set_params(&action(&[("a", None), ("b", None)]), &[]);
+        assert_eq!(panel.focus, None);
+        panel.move_focus(false);
+        assert_eq!(panel.focus, Some(0));
+        panel.move_focus(false);
+        assert_eq!(panel.focus, Some(1));
+        panel.move_focus(false);
+        assert_eq!(panel.focus, None);
+        panel.move_focus(true);
+        assert_eq!(panel.focus, Some(1));
+        // Without a message, only the params.
+        let mut panel = self::panel(&[]);
+        panel.set_params(&action(&[("a", None), ("b", None)]), &[]);
+        panel.move_focus(true);
+        assert_eq!(panel.focus, Some(1));
+        panel.move_focus(false);
+        assert_eq!(panel.focus, Some(0));
+        // No field at all.
+        let mut panel = self::panel(&[]);
+        panel.move_focus(false);
+        assert_eq!(panel.focus, None);
     }
 }

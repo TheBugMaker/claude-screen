@@ -145,19 +145,28 @@ pub fn exclude_worktrees(repo: &Path) -> Result<(), String> {
     write().map_err(|err| format!("writing {}: {err}", path.display()))
 }
 
-/// Removes the worktree `name` that Claude made in `repo`, and its branch `worktree-<name>`,
-/// if nothing in it would be lost: no changes, and no commit that no other branch has. Either
-/// way it is unlocked, as Claude does when you keep one: the Claude that locked it is gone.
-/// Whether it was removed; it is kept on a detached HEAD, and is not there after Claude removed
-/// it itself.
-pub fn remove_if_unused(repo: &Path, name: &str) -> Result<bool, String> {
+/// Unlocks the worktree `name` that Claude made in `repo`, as Claude does when you keep one: the
+/// Claude that locked it is gone. Its path and branch, if it is there.
+pub fn unlock(repo: &Path, name: &str) -> Result<Option<(PathBuf, Option<String>)>, String> {
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
     let Some((path, branch)) = find_worktree(&list, name) else {
-        return Ok(false);
+        return Ok(None);
     };
     let dir = path.to_str().ok_or("the worktree path is not UTF-8")?;
     // Fails when it isn't locked, which is as good.
     let _ = git(repo, &["worktree", "unlock", dir]);
+    Ok(Some((path, branch)))
+}
+
+/// Removes the worktree `name` that Claude made in `repo`, and its branch `worktree-<name>`,
+/// if nothing in it would be lost: no changes, and no commit that no other branch has. A branch
+/// it was renamed to stays. Either way it is unlocked. Whether it was removed; it is kept on a
+/// detached HEAD, and is not there after Claude removed it itself.
+pub fn remove_if_unused(repo: &Path, name: &str) -> Result<bool, String> {
+    let Some((path, branch)) = unlock(repo, name)? else {
+        return Ok(false);
+    };
+    let dir = path.to_str().ok_or("the worktree path is not UTF-8")?;
     let Some(branch) = branch else {
         return Ok(false);
     };
@@ -346,6 +355,36 @@ mod tests {
         // A commit another branch has too is not lost.
         run(&repo, &["branch", "keep", "worktree-committed"]);
         assert!(remove_if_unused(&repo, "committed").unwrap());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn unlocks_a_worktree_it_keeps() {
+        let repo = repo();
+        let path = worktree(&repo, "ccs-1");
+        let (found, branch) = unlock(&repo, "ccs-1").unwrap().unwrap();
+        assert_eq!(found.canonicalize().unwrap(), path.canonicalize().unwrap());
+        assert_eq!(branch.as_deref(), Some("worktree-ccs-1"));
+        assert!(path.exists());
+        let list = git(&repo, &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(!list.contains("locked"), "{list}");
+        // Twice, or not there.
+        assert!(unlock(&repo, "ccs-1").unwrap().is_some());
+        assert!(unlock(&repo, "ccs-2").unwrap().is_none());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_branch_a_worktree_was_renamed_to() {
+        let repo = repo();
+        let path = worktree(&repo, "ccs-1");
+        commit_file(&path, "b.txt");
+        run(&path, &["branch", "-m", "ab-1-login"]);
+        // Its commit is on another branch: nothing in the worktree would be lost.
+        run(&repo, &["branch", "pushed", "ab-1-login"]);
+        assert!(remove_if_unused(&repo, "ccs-1").unwrap());
+        assert!(!path.exists());
+        assert_eq!(branches(&repo), "ab-1-login\nmain\npushed");
         std::fs::remove_dir_all(&repo).unwrap();
     }
 

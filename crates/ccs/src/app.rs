@@ -9,7 +9,7 @@ use ccs_claude::{
     session::{Session, State},
 };
 use ccs_core::{
-    config::{Config, Mode, TabDef},
+    config::{After, Config, Mode, TabDef},
     keys::{Action, Bindings},
 };
 use ccs_term::{Pty, PtyEvent};
@@ -131,6 +131,8 @@ pub struct View {
     pub split: Option<Split>,
     /// The last merge of the session's work (leader m).
     merge: Option<MergeRun>,
+    /// An action with `after = "keep"` got its work in: its worktree stays when it closes.
+    keep_worktree: bool,
 }
 
 /// Two tabs side by side.
@@ -150,7 +152,7 @@ struct MergeRun {
     /// The key of the merge tab's terminal.
     tab: u64,
     /// The variables it ran with, which its conflict prompt is filled in from too.
-    env: Vec<(&'static str, String)>,
+    env: Vec<(String, String)>,
     /// The conflicts there were before it ran.
     before: Unmerged,
     /// The branch the work goes into, checked out in the session's `repo`.
@@ -265,9 +267,9 @@ impl View {
 
     /// The variables of the session's tabs. Each is set, empty when unknown, so that none comes
     /// from a ccs this one runs in.
-    fn tab_env(&self) -> Vec<(&'static str, String)> {
+    fn tab_env(&self) -> Vec<(String, String)> {
         let path = |path: &Path| path.to_string_lossy().into_owned();
-        vec![
+        [
             ("CS_CWD", path(&self.cwd)),
             ("CS_REPO", path(&self.repo)),
             ("CS_BRANCH", git::branch(&self.cwd).unwrap_or_default()),
@@ -286,7 +288,19 @@ impl View {
                 "CS_SESSION_ID",
                 self.session.session_id.clone().unwrap_or_default(),
             ),
+            ("CS_TITLE", self.title().unwrap_or_default().to_owned()),
         ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect()
+    }
+
+    /// The session's `/rename` name, else the title Claude gave it.
+    fn title(&self) -> Option<&str> {
+        self.session
+            .name
+            .as_deref()
+            .or(self.session.ai_title.as_deref())
     }
 
     /// Runs the command of `tabs[index]`, again if it ran before, at its size in a window of
@@ -398,7 +412,7 @@ impl Tab {
     fn start(
         &mut self,
         cwd: &Path,
-        env: &[(&str, String)],
+        env: &[(String, String)],
         key: u64,
         size: (u16, u16),
         ptys: ccs_term::EventSender,
@@ -409,7 +423,7 @@ impl Tab {
         self.key = key;
         let env: Vec<(&str, &str)> = env
             .iter()
-            .map(|(name, value)| (*name, value.as_str()))
+            .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
         match Pty::spawn(&self.def.command, cwd, &env, size, key, ptys) {
             Ok(pty) => self.pty = Some(pty),
@@ -596,6 +610,7 @@ impl App {
             tab: 0,
             split: None,
             merge: None,
+            keep_worktree: false,
         };
         self.peer_tabs(&mut view);
         Ok(view)
@@ -1021,16 +1036,17 @@ impl App {
     }
 
     /// Removes the worktree of a session that is over, on a thread, if ccs asked for it and
-    /// nothing in it would be lost. A session named with `/rename` keeps it, as Claude does.
-    /// Dropping `view` ends the programs in its terminals.
+    /// nothing in it would be lost. A session named with `/rename` keeps it, as Claude does, and
+    /// so does one whose action kept it. Dropping `view` ends the programs in its terminals.
     fn discard(&mut self, view: View) {
         let View {
             repo,
             worktree,
             session,
+            keep_worktree,
             ..
         } = view;
-        if let Some(worktree) = worktree.filter(|_| session.name.is_none()) {
+        if let Some(worktree) = worktree.filter(|_| session.name.is_none() && !keep_worktree) {
             self.remove_worktree(repo, worktree.name);
         }
     }
@@ -1042,6 +1058,16 @@ impl App {
                 Ok(true) => tracing::info!(name, "removed the unused worktree"),
                 Ok(false) => tracing::info!(name, "the worktree holds work, or is gone"),
                 Err(err) => tracing::warn!(name, "removing the worktree failed: {err}"),
+            }
+        }));
+    }
+
+    /// Unlocks the worktree `name` of `repo` on a thread, as Claude does when you keep one: the
+    /// Claude that locked it is gone.
+    fn unlock_worktree(&mut self, repo: PathBuf, name: String) {
+        self.cleanups.push(std::thread::spawn(move || {
+            if let Err(err) = git::unlock(&repo, &name) {
+                tracing::warn!(name, "unlocking the worktree failed: {err}");
             }
         }));
     }
@@ -1421,17 +1447,12 @@ impl App {
             .filter(|v| !plain && v.key != view.key && v.cwd == view.repo)
             .count();
         let mut message = Input::default();
-        let title = view
-            .session
-            .name
-            .as_ref()
-            .or(view.session.ai_title.as_ref());
         if !changes.is_empty()
-            && let Some(title) = title
+            && let Some(title) = view.title()
         {
             message.insert(title);
         }
-        Ok(MergePanel {
+        let mut panel = MergePanel {
             view: view.key,
             branch,
             target,
@@ -1440,9 +1461,13 @@ impl App {
             others,
             message,
             action: 0,
+            params: Vec::new(),
+            focus: None,
             needs_message: false,
             finish: false,
-        })
+        };
+        panel.set_params(&self.config.merges[0], &view.tab_env());
+        Ok(panel)
     }
 
     /// Runs the `[[merge]]` picked in `panel` in a merge tab of its session, and shows the tab. In
@@ -1480,7 +1505,8 @@ impl App {
             repo: git::unmerged(&view.repo),
         };
         let mut env = view.tab_env();
-        env.push(("CS_MESSAGE", message.unwrap_or_default()));
+        env.push(("CS_MESSAGE".to_owned(), message.unwrap_or_default()));
+        env.extend(panel.param_vars());
         let mut tab = Tab {
             def: tab_def,
             pty: None,
@@ -1556,24 +1582,36 @@ impl App {
         }
     }
 
-    /// The work of session `index` is in its target. The session closes, and its worktree goes
-    /// if nothing in it would be lost, even if the session is named. If you were on it, you go on
-    /// as after a prompt you submit, to a new session if none waits. Not while Claude is busy,
+    /// The work of session `index` is in its target, and the `after` of its action says what
+    /// comes next. The session closes, unless it stays, and its worktree goes if nothing in it
+    /// would be lost, even if the session is named, unless it is kept. If you were on it, you go
+    /// on as after a prompt you submit, to a new session if none waits. Not while Claude is busy,
     /// which closing would stop.
     fn merged(&mut self, index: usize) {
         let view = &mut self.views[index];
         let name = ui::session_name(view);
-        let target = match &mut view.merge {
+        let (target, action) = match &mut view.merge {
             Some(run) => {
                 run.fixer = None;
-                run.target.clone()
+                (run.target.clone(), run.action)
             }
-            None => String::new(),
+            None => (String::new(), None),
         };
+        let def = action.map(|action| &self.config.merges[action]);
+        let after = def.map_or(After::Remove, |def| def.after);
+        // An action that keeps the worktree may not merge at all, as one that pushes.
+        let done = match def {
+            Some(def) if after != After::Remove => format!("{} done for {name}", def.name),
+            _ => format!("merged {name} into {target}"),
+        };
+        // The last action says what becomes of the worktree.
+        match after {
+            After::Stay => return self.inform(done),
+            After::Keep => view.keep_worktree = true,
+            After::Remove => view.keep_worktree = false,
+        }
         if view.session.state() != State::Idle {
-            self.inform(format!(
-                "merged {name} into {target}; Claude is busy, so the session stays open"
-            ));
+            self.inform(format!("{done}; Claude is busy, so the session stays open"));
             return;
         }
         let view = self.drop_view(index);
@@ -1583,20 +1621,26 @@ impl App {
             // Resumed, or moved there.
             None => worktree_name(&view.cwd),
         };
+        let keep = view.keep_worktree;
         // Ends its programs, Claude's too, before its worktree goes.
         drop(view);
         if let Some(worktree) = worktree {
-            self.remove_worktree(repo.clone(), worktree);
+            if keep {
+                self.unlock_worktree(repo.clone(), worktree);
+            } else {
+                self.remove_worktree(repo.clone(), worktree);
+            }
         }
         if self.views.is_empty()
             && let Err(err) = self.open(&repo, None, true)
         {
             // `run` stops before drawing again, and drawing needs a session.
             self.quit = true;
-            self.failure = Some(err.wrap_err(format!("merged {name}, then opening a session")));
+            self.failure = Some(err.wrap_err(format!("{done}, then opening a session")));
             return;
         }
-        self.inform(format!("merged {name} into {target}"));
+        let kept = if keep { "; its worktree stays" } else { "" };
+        self.inform(format!("{done}{kept}"));
     }
 
     /// Takes session `index` away, as a merge closed it. If it was on screen, you go on as after a
@@ -1812,8 +1856,16 @@ impl App {
             match key.code {
                 // Finishing a merge has no action to pick.
                 KeyCode::Tab | KeyCode::BackTab if panel.finish => {}
-                KeyCode::Tab => panel.action = (panel.action + 1) % count,
-                KeyCode::BackTab => panel.action = (panel.action + count - 1) % count,
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let back = key.code == KeyCode::BackTab;
+                    panel.action = (panel.action + if back { count - 1 } else { 1 }) % count;
+                    // Its params, their defaults from the session's variables.
+                    if let Some(view) = self.views.iter().find(|v| v.key == panel.view) {
+                        panel.set_params(&self.config.merges[panel.action], &view.tab_env());
+                    }
+                }
+                KeyCode::Up => panel.move_focus(true),
+                KeyCode::Down => panel.move_focus(false),
                 KeyCode::Enter if !newline => {
                     if panel.commit_message() == Some("") {
                         panel.needs_message = true;
@@ -1821,12 +1873,20 @@ impl App {
                         self.run_merge(panel);
                     }
                 }
-                // Only a message to type: nothing else in the panel takes keys.
-                _ => {
-                    if panel.commit_message().is_some() && panel.message.handle_key(key) {
-                        panel.needs_message = false;
+                _ => match panel.focus {
+                    Some(param) => {
+                        // A param is one line.
+                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        if key.code != KeyCode::Enter && !(ctrl && key.code == KeyCode::Char('j')) {
+                            panel.params[param].input.handle_key(key);
+                        }
                     }
-                }
+                    None => {
+                        if panel.commit_message().is_some() && panel.message.handle_key(key) {
+                            panel.needs_message = false;
+                        }
+                    }
+                },
             }
             return;
         }
@@ -1890,6 +1950,8 @@ fn finish_panel(view: &View, merged: &View) -> Result<MergePanel, String> {
         others: 0,
         message: Input::default(),
         action: 0,
+        params: Vec::new(),
+        focus: None,
         needs_message: false,
         finish: true,
     })
@@ -2122,6 +2184,7 @@ mod tests {
             tab: 0,
             split: None,
             merge: None,
+            keep_worktree: false,
         }
     }
 
@@ -2569,6 +2632,12 @@ mod tests {
         assert_eq!(after["CS_REPO"], path(&repo));
         assert_eq!(after["CS_GIT_BASE"], "abc");
         assert_eq!(after["CS_SESSION_ID"], "5c1c");
+        // The title Claude gives the session, until you name it.
+        assert_eq!(after["CS_TITLE"], "");
+        view.session.ai_title = Some("Fix the login".into());
+        assert_eq!(env(&view)["CS_TITLE"], "Fix the login");
+        view.session.name = Some("login".into());
+        assert_eq!(env(&view)["CS_TITLE"], "login");
         std::fs::remove_dir_all(repo).unwrap();
     }
 
@@ -2888,6 +2957,174 @@ mod tests {
         std::fs::remove_dir_all(&repo).unwrap();
     }
 
+    /// An action that runs `command` with the params `params` (name, default), and `after`.
+    fn action(command: &str, params: &[(&str, Option<&str>)], after: After) -> MergeDef {
+        MergeDef {
+            name: "mr".into(),
+            commit: r#"git add -A && git commit -qm "$CS_TYPE: ab#$CS_TICKET: $CS_MESSAGE""#.into(),
+            command: command.into(),
+            on_conflict: None,
+            params: params
+                .iter()
+                .map(|&(name, default)| ccs_core::config::ParamDef {
+                    name: name.into(),
+                    prompt: None,
+                    default: default.map(str::to_owned),
+                })
+                .collect(),
+            after,
+        }
+    }
+
+    #[test]
+    fn a_merge_asks_for_its_params_and_runs_with_them() {
+        let (repo, tree) = merge_repo("params");
+        let (mut app, mut events) = app_with_ptys();
+        let out = repo.join(".git/ccs-out");
+        app.config.merges = vec![action(
+            r#"printf '%s|%s' "$CS_TICKET" "$CS_SUMMARY" > "$CS_REPO/.git/ccs-out""#,
+            &[
+                ("ticket", None),
+                ("type", Some("feat")),
+                ("summary", Some("$CS_TITLE!")),
+            ],
+            After::Remove,
+        )];
+        app.views.push(view(0, repo.clone()));
+        let mut view = ready_view(1, &repo, &tree);
+        view.session.name = Some("Add b".into());
+        app.views.push(view);
+        app.active = 1;
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        let panel = |app: &App| match &app.modal {
+            Some(Modal::Merge(panel)) => panel
+                .params
+                .iter()
+                .map(|p| p.input.text().to_owned())
+                .collect::<Vec<_>>(),
+            _ => panic!("no panel: {:?}", app.notice),
+        };
+        // Defaults filled in from the session's variables; the keys go to the message first.
+        assert_eq!(panel(&app), ["", "feat", "Add b!"]);
+        app.on_modal_key(KeyEvent::from(KeyCode::Down));
+        modal_keys(&mut app, " 123 ");
+        // A param is one line.
+        app.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        // Picking the action again keeps what was typed.
+        app.on_modal_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(panel(&app), [" 123 ", "feat", "Add b!"]);
+        merge(&mut app, &mut events);
+        // Trimmed, for the commit and the command alike.
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "123|Add b!");
+        assert_eq!(
+            run_git(&repo, &["log", "-1", "--format=%s", "worktree-ccs-1"]),
+            "feat: ab#123: Add b"
+        );
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn an_action_that_keeps_the_worktree_closes_the_session_and_leaves_it() {
+        let (repo, tree) = merge_repo("keep");
+        let (mut app, mut events) = app_with_ptys();
+        // As a pull request: on a branch named for it, pushed, and merged later.
+        app.config.merges = vec![action(
+            "git branch -m ab-1-add-b",
+            &[("ticket", None), ("type", None)],
+            After::Keep,
+        )];
+        run_git(&repo, &["worktree", "lock", tree.to_str().unwrap()]);
+        app.views.push(view(0, repo.clone()));
+        let mut view = ready_view(1, &repo, &tree);
+        view.session.name = Some("Add b".into());
+        app.views.push(view);
+        app.active = 1;
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        merge(&mut app, &mut events);
+        assert_eq!(keys(&app), [0]);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("mr done for Add b; its worktree stays")
+        );
+        assert!(app.notice_ok);
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        assert!(tree.exists());
+        assert_eq!(git::branch(&tree).as_deref(), Some("ab-1-add-b"));
+        let list = run_git(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(!list.contains("locked"), "{list}");
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn a_kept_worktree_stays_when_a_busy_session_closes_later() {
+        let (repo, tree) = merge_repo("keep-busy");
+        let (mut app, mut events) = app_with_ptys();
+        app.config.merges = vec![action("true", &[], After::Keep)];
+        app.views.push(view(0, repo.clone()));
+        let mut view = ready_view(1, &repo, &tree);
+        // Its own worktree, which ccs would remove when it closes.
+        view.worktree = Some(Worktree {
+            name: "ccs-1".into(),
+            base: String::new(),
+        });
+        app.views.push(view);
+        app.active = 1;
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        modal_keys(&mut app, "Add b");
+        app.on_modal_key(KeyEvent::from(KeyCode::Enter));
+        let key = app.views[1].tabs.last().unwrap().key;
+        // Busy by the time it ends: the session stays.
+        app.views[1].session.bridge(Bridge::Submitted);
+        wait_exit(&mut app, &mut events, key);
+        assert_eq!(keys(&app), [0, 1]);
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(
+            notice.ends_with("Claude is busy, so the session stays open"),
+            "{notice}"
+        );
+        // Its commit is in no other branch, but it could be: closed later, the worktree stays.
+        run_git(&repo, &["branch", "pushed", "worktree-ccs-1"]);
+        let view = app.views.remove(1);
+        app.discard(view);
+        for cleanup in app.cleanups.drain(..) {
+            cleanup.join().unwrap();
+        }
+        assert!(tree.exists());
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn an_action_that_stays_leaves_the_session_open() {
+        let (repo, tree) = merge_repo("stay");
+        let (mut app, mut events) = app_with_ptys();
+        app.config.merges = vec![action("true", &[], After::Stay)];
+        app.views.push(view(0, repo.clone()));
+        let mut view = ready_view(1, &repo, &tree);
+        view.session.name = Some("Add b".into());
+        app.views.push(view);
+        app.active = 1;
+        std::fs::write(tree.join("b.txt"), "b\n").unwrap();
+        leader_key(&mut app, KeyCode::Char('m'));
+        merge(&mut app, &mut events);
+        assert_eq!(keys(&app), [0, 1]);
+        assert_eq!(app.notice.as_deref(), Some("mr done for Add b"));
+        assert!(app.notice_ok);
+        assert!(tree.exists());
+        // Leader m runs it again, the commit to push this time.
+        leader_key(&mut app, KeyCode::Char('m'));
+        assert!(matches!(&app.modal, Some(Modal::Merge(panel)) if panel.ahead == 1));
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
     #[test]
     fn a_merge_moves_you_on_as_a_submitted_prompt_does() {
         // Past the busy session beside it, to one that waits; with none waiting, to a new one.
@@ -2975,6 +3212,8 @@ mod tests {
             commit: MERGE_COMMIT.into(),
             command: "git merge --no-edit main".into(),
             on_conflict: Some("Fix the merge of $CS_REPO_BRANCH into ${CS_BRANCH}.".into()),
+            params: Vec::new(),
+            after: After::Remove,
         }];
         let mut view = ready_view(0, &repo, &tree);
         // In place of Claude, to take the prompt.

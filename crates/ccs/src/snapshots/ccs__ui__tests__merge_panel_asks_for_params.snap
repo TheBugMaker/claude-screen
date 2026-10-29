@@ -1,0 +1,20 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"       ╭ Merge · worktree-ccs-1 → main ───────────────────────╮       "
+"       │1 commit · 1 changed file                             │       "
+"       │   M src/app.rs                                       │       "
+"       │                                                      │       "
+"       │Commit message                                        │       "
+"       │› Add the login form                                  │       "
+"       │                                                      │       "
+"       │ADO ticket  › 12345                                   │       "
+"       │type        › feat                                    │       "
+"       ╰ Enter merge request · ↑↓ field · Esc cancel ─────────╯       "
+"                                                                      "
+"                                                                      "
+"                                                                      "

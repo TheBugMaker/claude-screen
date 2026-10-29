@@ -12,6 +12,7 @@
 #   CS_REPO_BRANCH  the branch checked out in CS_REPO, which leader m merges into
 #   CS_GIT_BASE     the commit the session's worktree started from
 #   CS_SESSION_ID   Claude's session id
+#   CS_TITLE        the session's /rename name, else the title Claude gave it
 #
 # Each is empty when there is none, or before Claude reports it. For example:
 # command = "git --no-pager diff --color=always $CS_GIT_BASE | less -R"
@@ -55,8 +56,9 @@ slide_ms = 150
 # don't change each other's files. Its tabs run there too. On /exit, Claude removes a worktree
 # with nothing in it, and asks first when it has changes, commits made since the session started
 # (merged or not), or a /rename name. ccs removes it when it closes a session another way, or when
-# you kept one whose commits are in other branches already, if nothing in it would be lost.
-# Sessions outside git, or before the first commit, get none.
+# you kept one whose commits are in other branches already, if nothing in it would be lost, but
+# not after a [[merge]] with after = "keep". Sessions outside git, or before the first commit, get
+# none.
 worktree = true
 
 # A new session starts in Claude's plan mode (`claude --permission-mode plan`): Claude plans and
@@ -130,14 +132,29 @@ command = "lazygit"
 #
 #   commit       runs first, in the session's directory, when it has changes; the message is
 #                in CS_MESSAGE (default: git add -A && git commit -m "$CS_MESSAGE")
-#   command      runs next, with the tab variables above. Exiting 0 means the work is in: the
-#                session closes, and its worktree goes if nothing in it would be lost
+#   command      runs next, with the tab variables above. Exiting 0 means the work is in, and
+#                `after` says what comes next. CS_BRANCH is the branch when the action started:
+#                after git branch -m, ask git (git branch --show-current)
 #   on_conflict  when the command stops on conflicts, the prompt for the Claude that fixes
 #                them, with $CS_* names filled in: the session's own Claude for conflicts in its
 #                directory, a new merge session in the main checkout for conflicts there. You
 #                review its fix, and leader m in it commits the merge; then both close. While
 #                Claude fixes them you go on to a session that needs you, and Enter takes you
 #                back there first once it is done. Without it, a conflict only gets a notice
+#   params       values the panel asks for, each set as CS_<NAME>, trimmed, for commit, command
+#                and on_conflict: [{ name = "ticket", prompt = "ADO ticket", default = "" }].
+#                The name is lowercase letters, digits and _, and not one of the variables
+#                above; prompt is what the panel shows before it (default: the name); default is
+#                what it starts with, $CS_* names filled in. Up and Down go from field to field,
+#                and a value you typed stays when Tab picks another action that asks for it.
+#                Empty is a value too: the action says what it needs
+#   after        what a command that exits 0 does to the session:
+#                  "remove"  it closes, and its worktree goes if nothing in it would be lost
+#                            (the default)
+#                  "keep"    it closes and its worktree stays, branch and all: leader f finds it,
+#                            by its branch too, and resumes it there, to work on it again, as
+#                            when a pull request is reviewed
+#                  "stay"    it stays open
 #
 # Leader m does nothing while Claude is working, nor when there is nothing to merge. With
 # several [[merge]], Tab picks one in the panel. This one is the default:
@@ -162,11 +179,60 @@ review it and commit it myself. If a conflict can't be resolved safely, stop and
 # name = "merge and push"
 # command = 'git -C "$CS_REPO" merge --no-edit "$CS_BRANCH" && git -C "$CS_REPO" push'
 #
-# # A session closed after its pull request is opened keeps its commits on the remote, but
-# # its worktree goes: resuming it later starts in the main checkout.
+# # A pull request from a branch named as your team names them (PROJ-123-login, feature/login,
+# # you/login, ...): the panel asks for the name, prefilled with the branch's, and the command
+# # renames the branch if you changed it. The worktree stays: resumed after the review, the
+# # session pushes to the same branch, and the pull request has the new commits.
 # [[merge]]
 # name = "pull request"
-# command = 'git push -u origin "$CS_BRANCH" && gh pr create --fill --base "$CS_REPO_BRANCH" --head "$CS_BRANCH"'
+# params = [{ name = "new_branch", prompt = "branch", default = "$CS_BRANCH" }]
+# after = "keep"
+# command = '''
+# set -e
+# branch=${CS_NEW_BRANCH:-$CS_BRANCH}
+# [ "$branch" = "$CS_BRANCH" ] || git branch -m "$branch"
+# git push -u origin "$branch"
+# gh pr view "$branch" >/dev/null 2>&1 || gh pr create --fill --base "$CS_REPO_BRANCH" --head "$branch"'''
+#
+# # A GitLab merge request on a branch named after its Azure Boards ticket, ab-<ticket>-<title>,
+# # with commits as `feat: ab#<ticket>: <message>`. The ticket is asked for the first time only:
+# # a branch named already keeps its name, and the commits take the ticket from it.
+# [[merge]]
+# name = "merge request"
+# params = [
+#   { name = "ticket", prompt = "ADO ticket (first time)" },
+#   { name = "type", prompt = "commit type", default = "feat" },
+# ]
+# after = "keep"
+# commit = '''
+# set -e
+# case "$CS_BRANCH" in
+#   ab-*) ticket=${CS_BRANCH#ab-}; ticket=${ticket%%-*} ;;
+#   *) ticket=$(printf %s "$CS_TICKET" | tr -cd 0-9) ;;
+# esac
+# [ -n "$ticket" ] || { echo "type the ADO ticket"; exit 1; }
+# git add -A
+# git commit -m "$CS_TYPE: ab#$ticket: $CS_MESSAGE"'''
+# command = '''
+# set -e
+# branch=$(git branch --show-current)
+# case "$branch" in
+#   ab-*) ;;
+#   *) ticket=$(printf %s "$CS_TICKET" | tr -cd 0-9)
+#      [ -n "$ticket" ] || { echo "type the ADO ticket"; exit 1; }
+#      slug=$(printf %s "$CS_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-*//; s/-*$//')
+#      branch="ab-$ticket${slug:+-$slug}"
+#      git branch -m "$branch" ;;
+# esac
+# git push -u origin "$branch"
+# glab mr view "$branch" >/dev/null 2>&1 ||
+#   glab mr create --source-branch "$branch" --target-branch "$CS_REPO_BRANCH" --fill --yes'''
+#
+# # Pushes for CI, and the session goes on.
+# [[merge]]
+# name = "push"
+# after = "stay"
+# command = 'git push -u origin HEAD'
 #
 # # Conflicts come up in the session's worktree, so its own Claude fixes them; then leader m
 # # again.
@@ -177,10 +243,14 @@ review it and commit it myself. If a conflict can't be resolved safely, stop and
 
 # Planned, not parsed yet (ccs rejects these fields):
 #
-#   params     values asked for when the tab opens, each set as CS_<NAME> (CS_FILE, CS_FILTER)
+#   params     on a [[tab]]: values asked for when the tab opens, as [[merge]] has them, and
+#              pickers (CS_FILE, CS_FILTER)
 #   on_demand  ask for parameters every time the tab is opened
 #   on_change  re-run when Claude edits files or finishes a turn
 #   on_idle    run when the Chat tab goes idle
+#   branch     at the top: the branch a new session gets, from a template such as
+#              "ab-{ticket}-{title}", its fields asked for when the session starts, for hooks
+#              that need the name before the first commit
 #
 # [[tab]]
 # name = "diff"

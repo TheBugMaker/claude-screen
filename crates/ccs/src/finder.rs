@@ -43,6 +43,9 @@ pub struct OldSession {
     /// For a session in a worktree: whether its branch is merged into the one the main checkout
     /// is on (`true`), or has commits that one doesn't (`false`). `None` when neither is known.
     pub merged: Option<bool>,
+    /// For a session in a worktree that is still there: the branch it is on, when that has a name
+    /// of its own (see [`own_branch`]).
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +62,8 @@ pub struct Item {
     pub target: Target,
     pub title: String,
     pub prompts: Vec<String>,
+    /// The branch of its worktree, when it has a name of its own: searched as the title is.
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,20 +142,22 @@ pub fn scan(cwd: &Path) -> Result<Vec<OldSession>, String> {
                 .iter()
                 .map(|p| clip(p))
                 .collect();
-            let merged = past.cwd.as_deref().and_then(|cwd| {
+            // Claude names the branch after the worktree, but one it adopted, or that was
+            // renamed, can be on any.
+            let worktree = past.cwd.as_deref().and_then(|cwd| {
                 let name = worktree_name(cwd)?;
-                // Claude names the branch after the worktree, but one it adopted can be on any.
-                let branch = cwd
-                    .is_dir()
-                    .then(|| git::branch(cwd))
-                    .flatten()
-                    .unwrap_or_else(|| format!("worktree-{name}"));
+                Some((name, cwd.is_dir().then(|| git::branch(cwd)).flatten()))
+            });
+            let merged = worktree.as_ref().and_then(|(name, branch)| {
+                let branch = branch.clone().unwrap_or_else(|| format!("worktree-{name}"));
                 state(&branch, &merged, &not_in)
             });
+            let branch = worktree.and_then(|(name, branch)| own_branch(&name, branch));
             OldSession {
                 past,
                 prompts,
                 merged,
+                branch,
             }
         })
         .collect())
@@ -168,22 +175,32 @@ fn state(branch: &str, merged: &[String], not_in: &[String]) -> Option<bool> {
     }
 }
 
-fn open(views: &[View]) -> Vec<(&Session, &Path)> {
+/// `branch`, the one checked out in worktree `name`, when it has a name of its own: not the
+/// `worktree-<name>` Claude made with it, as when an action renamed it for a pull request.
+fn own_branch(name: &str, branch: Option<String>) -> Option<String> {
+    branch.filter(|branch| *branch != format!("worktree-{name}"))
+}
+
+fn open(views: &[View]) -> Vec<(&Session, &Path, Option<String>)> {
     views
         .iter()
-        // Named after the project, not the worktree it works in.
-        .map(|v| (&v.session, v.repo.as_path()))
+        .map(|v| {
+            let branch =
+                worktree_name(&v.cwd).and_then(|name| own_branch(&name, git::branch(&v.cwd)));
+            // Named after the project, not the worktree it works in.
+            (&v.session, v.repo.as_path(), branch)
+        })
         .collect()
 }
 
 /// Open sessions in session bar order, then past ones that are not open, newest first. `open`
-/// are the sessions and their directories.
-fn items(open: &[(&Session, &Path)], old: &[OldSession]) -> Vec<Item> {
+/// are the sessions, their directories and their branches.
+fn items(open: &[(&Session, &Path, Option<String>)], old: &[OldSession]) -> Vec<Item> {
     let find_old = |id: Option<&str>| old.iter().find(|o| Some(o.past.id.as_str()) == id);
     let mut items: Vec<Item> = open
         .iter()
         .enumerate()
-        .map(|(i, &(session, cwd))| {
+        .map(|(i, (session, cwd, branch))| {
             // Its transcript file, found by the scan when it ran in the finder's project.
             let file = find_old(session.session_id.as_deref());
             let title = session
@@ -200,12 +217,13 @@ fn items(open: &[(&Session, &Path)], old: &[OldSession]) -> Vec<Item> {
                 target: Target::View(i),
                 title,
                 prompts: file.map(|o| o.prompts.clone()).unwrap_or_default(),
+                branch: branch.clone(),
             }
         })
         .collect();
     let open_ids: Vec<&str> = open
         .iter()
-        .filter_map(|(s, _)| s.session_id.as_deref())
+        .filter_map(|(s, _, _)| s.session_id.as_deref())
         .collect();
     items.extend(
         old.iter()
@@ -215,6 +233,7 @@ fn items(open: &[(&Session, &Path)], old: &[OldSession]) -> Vec<Item> {
                 target: Target::Old(i),
                 title: past_title(&o.past),
                 prompts: o.prompts.clone(),
+                branch: o.branch.clone(),
             }),
     );
     items
@@ -225,7 +244,7 @@ fn past_title(past: &PastSession) -> String {
     past.name.clone().unwrap_or_else(|| past.title.clone())
 }
 
-/// Items matching `query` by title or one of their prompts, best first. Equal scores
+/// Items matching `query` by title, branch or one of their prompts, best first. Equal scores
 /// keep the order of `items`. An empty query matches everything.
 fn rank(query: &str, items: &[Item], active_only: bool) -> Vec<Hit> {
     let shown = items
@@ -240,6 +259,10 @@ fn rank(query: &str, items: &[Item], active_only: bool) -> Vec<Hit> {
     for (i, item) in shown {
         fields.push((i, None));
         haystacks.push(&item.title);
+        if let Some(branch) = &item.branch {
+            fields.push((i, None));
+            haystacks.push(branch);
+        }
         for (p, prompt) in item.prompts.iter().enumerate() {
             fields.push((i, Some(p)));
             haystacks.push(prompt);
@@ -273,10 +296,17 @@ mod tests {
             target,
             title: title.into(),
             prompts: prompts.iter().map(|&p| p.into()).collect(),
+            branch: None,
         }
     }
 
     fn sample() -> Vec<Item> {
+        let mut rate = item(
+            Target::Old(0),
+            "Add rate limiting",
+            &["limit requests per user", "use a token bucket"],
+        );
+        rate.branch = Some("ab-12345-add-rate-limiting".into());
         vec![
             item(
                 Target::View(0),
@@ -284,11 +314,7 @@ mod tests {
                 &["the login form rejects valid passwords"],
             ),
             item(Target::View(1), "Bump CI", &[]),
-            item(
-                Target::Old(0),
-                "Add rate limiting",
-                &["limit requests per user", "use a token bucket"],
-            ),
+            rate,
         ]
     }
 
@@ -314,6 +340,22 @@ mod tests {
     #[test]
     fn a_prompt_match_shows_the_prompt() {
         assert_eq!(found("token bucket", false), [(2, Some(1))]);
+    }
+
+    #[test]
+    fn matches_branches_as_titles() {
+        assert_eq!(found("12345", false), [(2, None)]);
+        assert_eq!(found("ab-12345", false), [(2, None)]);
+    }
+
+    #[test]
+    fn only_a_branch_of_its_own_counts() {
+        assert_eq!(own_branch("ccs-1", Some("worktree-ccs-1".into())), None);
+        assert_eq!(own_branch("ccs-1", None), None);
+        assert_eq!(
+            own_branch("ccs-1", Some("ab-1-x".into())).as_deref(),
+            Some("ab-1-x")
+        );
     }
 
     #[test]
@@ -347,6 +389,7 @@ mod tests {
             },
             prompts: Vec::new(),
             merged: None,
+            branch: (id == "b").then(|| "ab-1-x".into()),
         };
         let mut resumed = Session::default();
         resumed.session_id = Some("a".into());
@@ -356,7 +399,12 @@ mod tests {
         let cwd = Path::new("/work/web");
         let mut old = [past("a"), past("b"), past("c")];
         old[0].prompts = vec!["fix the login bug".into()];
-        let items = items(&[(&resumed, cwd), (&renamed, cwd), (&fresh, cwd)], &old);
+        let open = [
+            (&resumed, cwd, None),
+            (&renamed, cwd, Some("ab-2-y".to_owned())),
+            (&fresh, cwd, None),
+        ];
+        let items = items(&open, &old);
         let found: Vec<(Target, &str)> =
             items.iter().map(|i| (i.target, i.title.as_str())).collect();
         // An open session takes its title from its transcript file, or else its directory. A name
@@ -373,6 +421,9 @@ mod tests {
         );
         // Its prompts come from there too.
         assert_eq!(items[0].prompts, ["fix the login bug"]);
+        // Open sessions have the branch they are on, past ones the one the scan found.
+        let branches: Vec<Option<&str>> = items.iter().map(|i| i.branch.as_deref()).collect();
+        assert_eq!(branches, [None, Some("ab-2-y"), None, Some("ab-1-x"), None]);
     }
 
     #[test]

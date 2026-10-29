@@ -75,9 +75,9 @@ For example, `session_1 = ["<leader>1", "<A-1>"]` adds Alt-1 and keeps the leade
 - **New sessions.** By default each new session works in its own git worktree and branch, made by `claude --worktree` (`.claude/worktrees/ccs-<id>`, branch `worktree-ccs-<id>`), so sessions don't change each other's files. Its tabs run there too. Outside git, or before the first commit, a session gets no worktree. `worktree = false` turns worktrees off.
 - **Plan mode.** New sessions start in Claude's plan mode, so Claude plans and asks before it changes anything. Shift+Tab changes the mode as usual. `plan = false` turns this off. Resumed sessions keep the user's own default mode.
 - **Names.** `/rename <name>` in Claude names the session. The session bar and the finder show the name. Otherwise they show Claude's title for the session.
-- **The finder** (leader f) searches names, titles, project names and the user's own prompts. It covers the sessions open in ccs and the past sessions from this directory.
+- **The finder** (leader f) searches names, titles, project names, branches with a name of their own (such as `ab-12345-login`, renamed by a merge action) and the user's own prompts. It covers the sessions open in ccs and the past sessions from this directory.
   - Enter goes to a session, and resumes it if it's a past one. Shift-Tab switches between open sessions only and both.
-  - A past session from a worktree says `merged` once its branch was merged into the main checkout's branch. It says `not merged` while its branch has commits that branch doesn't.
+  - A past session from a worktree says `merged` once its branch was merged into the main checkout's branch. It says `not merged` while its branch has commits that branch doesn't. A pull request merged on the forge doesn't count: this comes from the clone's reflog.
 - **Resuming from the shell.** `ccs --resume <session id>` resumes a past Claude Code session in its directory. `ccs [DIR]` starts ccs on a directory.
 - **Session switches** slide the new session in from the side of its chip. `slide_ms` sets the speed, and `slide_ms = 0` switches at once.
 
@@ -97,6 +97,7 @@ Commands get these variables, each empty when unknown:
 - `CS_REPO_BRANCH` is the branch in `CS_REPO`, which leader m merges into.
 - `CS_GIT_BASE` is the commit the worktree started from.
 - `CS_SESSION_ID` is Claude's session id.
+- `CS_TITLE` is the session's `/rename` name, else the title Claude gave it.
 
 For example, a tab running the tests:
 
@@ -113,12 +114,14 @@ Any `[[tab]]` in the user's config replaces the default `review` and `shell` tab
 
 Claude Code keeps a session in a worktree out of the main checkout: your git commands can't reach it, on purpose. So when the user wants the work in their main branch, tell them to press leader m rather than trying it yourself.
 
-1. A panel shows the branch, where it goes (the branch checked out in the main checkout), its commits, and the uncommitted files. When there are some, it asks for a commit message, prefilled with the session's title. Ctrl-J (or Shift-Enter where the terminal reports it) adds a new line. Tab picks between several `[[merge]]` actions. Enter runs the action, and Esc cancels.
-2. The action runs in a tab of the session, so passphrases and other prompts work. First its `commit` runs, by default `git add -A && git commit -m "$CS_MESSAGE"`, when there's something to commit. Then its `command` runs. The default merges the session's branch in the main checkout, if that has no uncommitted changes. A session without a worktree, working on that branch itself, only commits.
-3. When the command exits 0, the session closes and its worktree goes, if nothing in it would be lost. After the last session, a new one opens.
+1. A panel shows the branch, where it goes (the branch checked out in the main checkout), its commits, and the uncommitted files. When there are some, it asks for a commit message, prefilled with the session's title. Ctrl-J (or Shift-Enter where the terminal reports it) adds a new line. Tab picks between several `[[merge]]` actions. An action's `params` are asked for too, one line each, prefilled with their `default` (`$CS_*` names filled in); Up and Down move between the fields. Enter runs the action, and Esc cancels.
+2. The action runs in a tab of the session, so passphrases and other prompts work. First its `commit` runs, by default `git add -A && git commit -m "$CS_MESSAGE"`, when there's something to commit. Then its `command` runs. Both get each param as `CS_<NAME>`, trimmed. The default merges the session's branch in the main checkout, if that has no uncommitted changes. A session without a worktree, working on that branch itself, only commits.
+3. When the command exits 0, the action's `after` decides what happens. With `remove`, the default, the session closes and its worktree goes, if nothing in it would be lost. With `keep`, the session closes and its worktree stays: for a pull request under review, the user resumes it from the finder and presses leader m again to push to the same branch. With `stay`, the session stays open. After the last session, a new one opens.
 4. When it stops on conflicts, the action's `on_conflict` prompt goes to a Claude that can work where the conflicts are. Conflicts in the main checkout go to a new session there, without a worktree. Once that session commits the merge, it closes along with the merged session. Conflicts in the session's own worktree, as with a rebase-first action, go to the session's own Claude. Leader m runs again once they're fixed.
 
 Leader m does nothing while Claude is working, waiting for the user, or asleep, nor when there's nothing to merge. Only one merge runs in a main checkout at a time. A failed action leaves its tab open with a notice, and leader m runs it again. `[[merge]]` entries in the config replace the default, for example to push, open a pull request with `gh pr create`, or rebase first.
+
+Teams that name branches their own way (`PROJ-123-login`, `ab-<ticket>-<title>`) do it in the action: it renames the branch with `git branch -m` and pushes it, from a name or ticket asked for as a param. `CS_BRANCH` is the branch when the action started, so after the rename the command asks git for the new one (`git branch --show-current`). `config/example.toml` has a GitHub pull request and a GitLab merge request example, with `after = "keep"`.
 
 ## Themes
 

@@ -59,13 +59,16 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] indicate active sessions (currently open in claude screen) and old sessions
 - [x] shift-tab on the search pannel to cycle through searching only active sessions or both
 - [x] `/rename` in Claude names a session; the session bar and the finder show it
+- [x] The finder shows a session's branch when it has a name of its own (`ab-12345-login`, renamed by a `[[merge]]`), and searches it as it searches titles
+- [ ] A merged flag that knows remotes: pushed, merged into the target by a merge done elsewhere, gone on origin after a prune; an optional command that asks the forge (`glab`, `gh`) about squash merges
+- [ ] Keep each session's branch and params in ccs's own state, so the finder still finds a session by its ticket once its branch is deleted
 
 ### M4: Workgroup tabs
 - [x] Load `[[tab]]` definitions from `~/.config/ccs/config.toml` (see [`config/example.toml`](config/example.toml))
 - [x] A project's `.ccs/config.toml` changes any of it for that project, listing only what it changes: new tabs, a tab's command, `disabled_tabs` (see [`config/example-project.toml`](config/example-project.toml))
 - [x] Peer tabs running any command in a pseudo-terminal (`git diff`, `$SHELL`, `lazygit`, …)
-- [x] `CS_*` environment variables in every tab: `CS_CWD`, `CS_REPO`, `CS_BRANCH`, `CS_REPO_BRANCH`, `CS_GIT_BASE`, `CS_SESSION_ID`
-- [ ] Parameters as `CS_*` environment variables, asked for by prompt or picker (changed files)
+- [x] `CS_*` environment variables in every tab: `CS_CWD`, `CS_REPO`, `CS_BRANCH`, `CS_REPO_BRANCH`, `CS_GIT_BASE`, `CS_SESSION_ID`, `CS_TITLE`
+- [ ] Parameters of tabs as `CS_*` environment variables, asked for by prompt (as `[[merge]]` has them) or picker (changed files)
 - [x] Each session in its own git worktree (`claude --worktree`), its tabs there too; `worktree = false` turns it off
 - [x] Tab modes: `eager`, `lazy`, `regular`
 - [ ] Tab modes: `on_demand`, `on_change` (re-run when Claude edits files), `on_idle`
@@ -81,6 +84,15 @@ Claude Code draws its own screen in the Chat tab, so all of its features work as
 - [x] `[[merge]]` actions in the config, any shell command: merge, push, open a pull request, rebase; Tab picks one
 - [x] The action runs in a tab of the session, so passphrases and other prompts work; a successful one closes the session and removes its worktree
 - [x] Conflicts go to a Claude that can work where they are: a new merge session in the main checkout, whose fix you review and commit with leader m, or the session's own Claude in its worktree
+- [x] `params` on a `[[merge]]`: values the panel asks for, such as a ticket, set as `CS_<NAME>` for its commit and command, with defaults from the `CS_*` variables
+- [x] `after` on a `[[merge]]`: once it succeeds, the session closes and its worktree goes (`remove`), the worktree stays to resume the session for a review (`keep`), or the session stays open (`stay`)
+- [x] Team branch names, by renaming: an action renames the branch (`git branch -m`) and pushes it, and the session resumed after review pushes to the same branch (examples for GitHub pull requests and GitLab merge requests named after Azure Boards tickets)
+- [ ] Name the branch when the session starts, from a `branch` template (`ab-{ticket}-{title}`) whose fields are asked for when a spare session is picked up, for hooks that need the name before the first commit
+- [ ] Tell Claude the new branch when an action renames it in a session that stays open: the git status Claude got when the session started still names the old one
+- [ ] Mark the branches ccs owns (`git config branch.<b>.ccs-worktree <name>`, which follows `git branch -m`), so cleanup deletes a renamed branch too, and the finder knows a session's branch once its worktree is gone
+- [ ] Sweep kept worktrees whose pull request is done, optionally after `git fetch --prune`
+- [ ] Make a kept worktree again before resuming its session if it is gone, instead of going on in the main checkout
+- [ ] Remember param values per session (the ticket of the round before), and choices or pickers for params
 
 ### Themes
 - [x] One theme file colors Claude, ccs, the mods and every tab
@@ -113,7 +125,7 @@ Everything else starts with the leader, Ctrl-Space, then one key. These are the 
 | `1`–`9` | Go to session 1–9 |
 | `,` / `.` | Previous / next session |
 | `n` / `N` | Open a new session in this project: in a worktree of its own (unless `worktree = false`) / in the main checkout, without a worktree |
-| `f` | Find a session: fuzzy search over names, titles, project names and your prompts, in open sessions and past ones from this directory. A past session from a worktree says `merged` once the reflog of the main checkout's branch shows the session's branch merged in, and `not merged` while the session's branch has commits that one doesn't (merges made in this clone only, as far back as the reflog goes). Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
+| `f` | Find a session: fuzzy search over names, titles, project names, branches with a name of their own and your prompts, in open sessions and past ones from this directory. A past session from a worktree says `merged` once the reflog of the main checkout's branch shows the session's branch merged in, and `not merged` while the session's branch has commits that one doesn't (merges made in this clone only, as far back as the reflog goes). Enter goes to it (resuming a past one), Shift-Tab switches between open sessions only and both |
 | `m` | Commit and merge the session's work: see [Merging a session](#merging-a-session) |
 | `c` / a tab's key | Go to the Chat tab / that tab, on its own |
 | `C` / a tab's split key (`R` review, `S` shell) | Show Chat / that tab beside the one on screen, and type there. Chat goes on the left. With two on screen, it takes the place of the one on the right, or goes if it is one of them. On screen alone, Chat comes beside it |
@@ -134,9 +146,9 @@ Each session is a plain `claude` with your own settings and plugins; ccs only ad
 
 Claude Code keeps a session that works in a worktree out of the main checkout: its git commands can't reach it. ccs isn't the session, so it can do this step for you. Press the leader, then `m`:
 
-1. A panel shows the branch and where it goes (the branch checked out in the main checkout), its commits, and the files not committed yet. When there are some, it asks for a commit message, prefilled with the session's title (Ctrl-J, or Shift-Enter where your terminal reports it, for a new line). With several `[[merge]]` actions, Tab picks one. Enter runs it, Esc cancels.
-2. The action runs in a tab of the session: first its `commit` (by default `git add -A && git commit -m "$CS_MESSAGE"`) when there is something to commit, then its `command`. The default command merges the session's branch in the main checkout, if that has no uncommitted changes. A session that works on that branch itself, without a worktree, only commits.
-3. When the command exits 0, the session closes and its worktree goes, if nothing in it would be lost. If you were on it, you go on as after submitting a prompt: to the session that needs you most, or to a new one.
+1. A panel shows the branch and where it goes (the branch checked out in the main checkout), its commits, and the files not committed yet. When there are some, it asks for a commit message, prefilled with the session's title (Ctrl-J, or Shift-Enter where your terminal reports it, for a new line). With several `[[merge]]` actions, Tab picks one. An action with `params` asks for them too, one line each, prefilled with their `default`; Up and Down go from field to field. Enter runs it, Esc cancels.
+2. The action runs in a tab of the session: first its `commit` (by default `git add -A && git commit -m "$CS_MESSAGE"`) when there is something to commit, then its `command`, both with each param as `CS_<NAME>`. The default command merges the session's branch in the main checkout, if that has no uncommitted changes. A session that works on that branch itself, without a worktree, only commits.
+3. When the command exits 0, the action's `after` says what comes next. By default (`remove`) the session closes and its worktree goes, if nothing in it would be lost. With `keep` the session closes and its worktree stays, for a pull request that comes back from review: leader `f` finds the session, by its branch too, and resumes it in its worktree, and leader `m` there pushes again. With `stay` the session stays open. When it closes, if you were on it, you go on as after submitting a prompt: to the session that needs you most, or to a new one.
 4. When it stops on conflicts, a Claude that can work where they are gets the action's `on_conflict` prompt.
    - **Conflicts in the main checkout** go to a new **merge session** there, without a worktree.
      - Its Claude resolves the conflicts and stages them, but doesn't commit.
@@ -146,6 +158,15 @@ Claude Code keeps a session that works in a worktree out of the main checkout: i
    - While Claude fixes the conflicts, that session counts as busy, and so does the session merged. If you were on the session merged, you go on to the session that needs you most, or to a new one. Once the fixing Claude waits for you, submitting elsewhere takes you to it before any other session.
 
 Leader `m` does nothing while Claude is working, waiting for you, or waiting on background work, nor when there is nothing to merge. Only one merge runs in a main checkout at a time. Any other action fails with a notice and leaves its tab open; leader `m` runs it again. `[[merge]]` entries in the config replace the default; [`config/example.toml`](config/example.toml) has the default and examples that push, open a pull request, or rebase.
+
+### Team branch names
+
+Claude names a session's branch `worktree-<name>` when it makes the worktree, before you type anything. An action gives it your team's name when the work goes out: it renames the branch (`git branch -m`) and pushes it. Claude Code supports a worktree on another branch: when you `/exit` a resumed session, either answer keeps that branch and its commits. The examples ask for the new name in the panel (`pull request`), or build it from an Azure Boards ticket and the session's title, `ab-12345-fix-the-login-form`, with commits as `feat: ab#12345: …`, and open a GitLab merge request (`merge request`). The ticket is asked for once: in the next round, the branch has its name already. `CS_BRANCH` is the branch when the action started, so after `git branch -m` a command asks git for the new one. Limits for now:
+
+- With `after = "remove"`, the worktree of a pushed branch goes, but a branch it was renamed to stays.
+- If you resume a kept session, `/exit` and remove the worktree in Claude's dialog, Claude says it couldn't delete `worktree-<name>`: the renamed branch stays.
+- The finder's `merged` comes from this clone's reflog: a pull request merged on the forge doesn't show as merged.
+- Claude still names the old branch in a session that stays open after a rename: the git status it got when the session started is not updated.
 
 ## Themes
 

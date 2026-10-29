@@ -246,22 +246,15 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
         None => format!(" Merge · {} ", panel.branch),
     };
     let committing = panel.commit_message().is_some();
-    let mut keys = if panel.finish {
-        " Enter commit the merge ".to_owned()
-    } else {
-        format!(" Enter {} ", actions[panel.action])
-    };
-    if actions.len() > 1 && !panel.finish {
-        keys.push_str("· Tab action ");
-    }
-    keys.push_str("· Esc cancel ");
-    let block = theme::popup(title).title_bottom(Line::from(keys).fg(theme.dim));
+    let block =
+        theme::popup(title).title_bottom(Line::from(merge_keys(panel, actions)).fg(theme.dim));
     let mut bottom = merge_notes(panel, actions);
 
     // As wide as the finder, and as high as it needs to be, if it fits.
     let width = frame.area().width / 5 * 4;
     // The message wraps in the room the panel has, after its border and its `› `.
     let (rows, cursor) = panel.message.layout(width.saturating_sub(4));
+    let (params, param_cursor) = param_lines(panel, width.saturating_sub(2));
     let height = |lines: usize| u16::try_from(lines).unwrap_or(u16::MAX);
     // A blank line before each part.
     let message_height = if committing {
@@ -269,22 +262,24 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
     } else {
         0
     };
+    let params_height = height(params.len());
     let bottom_height = if bottom.is_empty() {
         0
     } else {
         height(bottom.len() + 1)
     };
     let changes = panel.changes.len().min(MERGE_CHANGES);
-    let wanted = height(1 + changes + 2) + message_height + bottom_height;
+    let wanted = height(1 + changes + 2) + message_height + params_height + bottom_height;
     let area = frame
         .area()
         .centered(Constraint::Length(width), Constraint::Length(wanted));
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [top, message, rest] = Layout::vertical([
+    let [top, message, fields, rest] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(message_height),
+        Constraint::Length(params_height),
         Constraint::Length(bottom_height),
     ])
     .areas(inner);
@@ -317,12 +312,23 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
     if committing {
         let mut lines = vec![Line::default(), Line::from("Commit message").fg(theme.dim)];
         lines.extend(rows.into_iter().enumerate().map(|(i, row)| {
-            let gutter = if i == 0 { "› " } else { "  " };
-            Line::from(vec![Span::raw(gutter).fg(theme.accent), Span::raw(row)])
+            let gutter = if i == 0 {
+                field_gutter(panel.focus.is_none())
+            } else {
+                Span::raw("  ")
+            };
+            Line::from(vec![gutter, Span::raw(row)])
         }));
         frame.render_widget(Paragraph::new(lines), message);
         let at = (message.x + 2 + cursor.0, message.y + 2 + cursor.1);
-        if message.contains(at.into()) {
+        if panel.focus.is_none() && message.contains(at.into()) {
+            frame.set_cursor_position(at);
+        }
+    }
+    frame.render_widget(Paragraph::new(params), fields);
+    if let Some((x, y)) = param_cursor {
+        let at = (fields.x + x, fields.y + y);
+        if fields.contains(at.into()) {
             frame.set_cursor_position(at);
         }
     }
@@ -330,6 +336,72 @@ fn render_merge(frame: &mut Frame, panel: &MergePanel, actions: &[&str]) {
         bottom.insert(0, Line::default());
         frame.render_widget(Paragraph::new(bottom), rest);
     }
+}
+
+/// The keys the merge panel takes, for its bottom border.
+fn merge_keys(panel: &MergePanel, actions: &[&str]) -> String {
+    let mut keys = if panel.finish {
+        " Enter commit the merge ".to_owned()
+    } else {
+        format!(" Enter {} ", actions[panel.action])
+    };
+    if actions.len() > 1 && !panel.finish {
+        keys.push_str("· Tab action ");
+    }
+    if usize::from(panel.commit_message().is_some()) + panel.params.len() > 1 {
+        keys.push_str("· ↑↓ field ");
+    }
+    keys.push_str("· Esc cancel ");
+    keys
+}
+
+/// The `› ` before a field of the merge panel, which stands out in the one that has your keys.
+fn field_gutter(focused: bool) -> Span<'static> {
+    let theme = theme::get();
+    Span::raw("› ").fg(if focused { theme.accent } else { theme.dim })
+}
+
+/// The params of the merge panel in `width` columns, after a blank line, each after its label;
+/// the labels line up. Where the cursor goes in them, if one has your keys. None at all without
+/// params.
+fn param_lines(panel: &MergePanel, width: u16) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
+    let theme = theme::get();
+    if panel.params.is_empty() {
+        return (Vec::new(), None);
+    }
+    // The widest label, the two spaces after it and the gutter.
+    let label = panel
+        .params
+        .iter()
+        .map(|param| param.label.chars().count() + 2)
+        .max()
+        .unwrap_or(0);
+    let room = usize::from(width).saturating_sub(label + 2);
+    let room = u16::try_from(room).unwrap_or(u16::MAX).max(1);
+    let column = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let mut lines = vec![Line::default()];
+    let mut at = None;
+    for (i, param) in panel.params.iter().enumerate() {
+        let focused = panel.focus == Some(i);
+        let (rows, cursor) = param.input.layout(room);
+        if focused {
+            at = Some((column(label + 2) + cursor.0, column(lines.len()) + cursor.1));
+        }
+        for (row_index, row) in rows.into_iter().enumerate() {
+            let mut spans = if row_index == 0 {
+                let pad = label - param.label.chars().count();
+                vec![
+                    Span::raw(format!("{}{}", param.label, " ".repeat(pad))).fg(theme.dim),
+                    field_gutter(focused),
+                ]
+            } else {
+                vec![Span::raw(" ".repeat(label + 2))]
+            };
+            spans.push(Span::raw(row));
+            lines.push(Line::from(spans));
+        }
+    }
+    (lines, at)
 }
 
 /// The end of the merge panel: the `actions` to pick from when there are several, and what you
@@ -442,6 +514,10 @@ fn render_finder(frame: &mut Frame, finder: &mut Finder, states: &[State]) {
                     Some(false) => spans.push(Span::raw(" · not merged").fg(theme::get().warning)),
                     None => {}
                 }
+            }
+            // Last, as it can be long.
+            if let Some(branch) = &item.branch {
+                spans.push(Span::raw(format!(" · {branch}")).fg(theme::get().dim));
             }
             let mut text = Text::from(Line::from(spans));
             if let Some(prompt) = hit.prompt {
@@ -960,6 +1036,7 @@ mod tests {
             },
             prompts: vec!["limit requests per user".into()],
             merged: Some(true),
+            branch: Some("ab-12-rl".into()),
         }];
         finder.loading = false;
         finder.items = vec![
@@ -967,17 +1044,19 @@ mod tests {
                 target: Target::View(0),
                 title: "Fix the login bug".into(),
                 prompts: vec!["the login form rejects valid user names".into()],
+                branch: None,
             },
             Item {
                 target: Target::Old(0),
                 title: "Add rate limiting".into(),
                 prompts: finder.old[0].prompts.clone(),
+                branch: finder.old[0].branch.clone(),
             },
         ];
         finder.query.insert("user");
         finder.refresh();
 
-        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
         terminal
             .draw(|frame| render_finder(frame, &mut finder, &[State::Working]))
             .unwrap();
@@ -1104,6 +1183,8 @@ mod tests {
             others: 1,
             message: crate::input::Input::default(),
             action: 1,
+            params: Vec::new(),
+            focus: None,
             needs_message: true,
             finish: false,
         };
@@ -1151,6 +1232,61 @@ mod tests {
         );
         assert!(!finish.contains("Commit message"), "{finish}");
         assert!(!finish.contains("Tab action"), "{finish}");
+    }
+
+    #[test]
+    fn merge_panel_asks_for_params() {
+        use ccs_core::config::{After, MergeDef, ParamDef};
+
+        let def = MergeDef {
+            name: "merge request".into(),
+            commit: String::new(),
+            command: "x".into(),
+            on_conflict: None,
+            params: vec![
+                ParamDef {
+                    name: "ticket".into(),
+                    prompt: Some("ADO ticket".into()),
+                    default: None,
+                },
+                ParamDef {
+                    name: "type".into(),
+                    prompt: None,
+                    default: Some("feat".into()),
+                },
+            ],
+            after: After::Keep,
+        };
+        let mut panel = MergePanel {
+            view: 0,
+            branch: "worktree-ccs-1".into(),
+            target: Some("main".into()),
+            changes: vec![" M src/app.rs".into()],
+            ahead: 1,
+            others: 0,
+            message: crate::input::Input::default(),
+            action: 0,
+            params: Vec::new(),
+            focus: None,
+            needs_message: false,
+            finish: false,
+        };
+        panel.message.insert("Add the login form");
+        panel.set_params(&def, &[]);
+        panel.move_focus(false);
+        panel.params[0].input.insert("12345");
+        let mut terminal = Terminal::new(TestBackend::new(70, 16)).unwrap();
+        terminal
+            .draw(|frame| render_merge(frame, &panel, &["merge request"]))
+            .unwrap();
+        insta::assert_snapshot!(terminal.backend());
+        // The cursor is in the field that has your keys: after the ticket.
+        let at = terminal.get_cursor_position().unwrap();
+        let line: String = (0..70)
+            .map(|x| terminal.backend().buffer()[(x, at.y)].symbol().to_owned())
+            .collect();
+        assert!(line.contains("ADO ticket  › 12345"), "{line}");
+        assert_eq!(terminal.backend().buffer()[(at.x - 1, at.y)].symbol(), "5");
     }
 
     #[test]
