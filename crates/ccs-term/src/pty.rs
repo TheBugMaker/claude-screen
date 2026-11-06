@@ -233,6 +233,15 @@ impl Pty {
         lock(&self.parser).screen().contents()
     }
 
+    /// The text from `start` to `end` (row, column from 0, both included) of the screen as it is
+    /// drawn, scrolled back or not.
+    #[must_use]
+    pub fn text_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        lock(&self.parser)
+            .screen()
+            .contents_between(start.0, start.1, end.0, end.1 + 1)
+    }
+
     /// Draws the screen into `area` of `buffer`, without the cursor.
     pub fn draw(&self, buffer: &mut Buffer, area: Rect) {
         self.dirty.store(false, Ordering::Release);

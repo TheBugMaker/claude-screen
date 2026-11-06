@@ -139,6 +139,37 @@ test('ready says where the session works, and a tool call that moves it reports 
   ])
 })
 
+test('a merge session starts with its prompt in the box, unsent, once there is a box, and only once', async ($, on) => {
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: '5c1c' }))
+  on('session.root', () => ({ value: '/work' }))
+  on('process.run', () => RAN)
+  mock.env(on, { ...ENV, CCS_DRAFT: 'Fix the merge.' })
+  const filled: string[] = []
+  // No box yet the first time.
+  on('prompt.fill', ($, e) => {
+    filled.push(e.text)
+    const isFilled = filled.length > 1
+    return { isFilled, text: isFilled ? e.text : '', cursor: isFilled ? e.text.length : 0 }
+  })
+  on('prompt.submit', () => {
+    throw new Error('the draft is for you to send')
+  })
+  const clock = mock.clock(on)
+  const start = { cwd: '/work', surface: 'terminal', isInteractive: true } as const
+
+  await $.session.start(start)
+  await clock.settle()
+  expect(filled).toEqual(['Fix the merge.'])
+  await clock.advance(100)
+  expect(filled).toEqual(['Fix the merge.', 'Fix the merge.'])
+  // Filled: no more tries, and a later start, as after /clear, leaves the box alone.
+  await clock.advance(1000)
+  await $.session.start(start)
+  await clock.advance(1000)
+  expect(filled).toEqual(['Fix the merge.', 'Fix the merge.'])
+})
+
 test('/plan has Haiku title the start of its prompt, and reports the guess', async ($, on) => {
   on('command.run', () => ({}))
   mock.env(on, ENV)

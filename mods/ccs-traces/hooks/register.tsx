@@ -6,6 +6,9 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, RenderNode, Register, SessionMessage } from 'claude-code'
 
 import type { Call } from '../types'
+import { classic, classicSwaps } from './classic'
+import { guarded, guardedSwaps } from './guarded'
+import type { Swaps } from './swaps'
 
 const RUN_OF = { plugin: 'ccs-traces', key: 'runOf' } as const
 const CALLS = { plugin: 'ccs-traces', key: 'calls' } as const
@@ -121,7 +124,7 @@ function stored(message: SessionMessage): Step[] {
 }
 
 /** Builds the index from the conversation so far: at start, on a resume, after `/clear`. */
-function rebuild($: EngineInterface) {
+export function rebuild($: EngineInterface) {
   queue(async () => {
     const built = fresh()
     const change = feed(built, (await $.session.messages()).flatMap(stored))
@@ -131,7 +134,13 @@ function rebuild($: EngineInterface) {
 }
 
 /** The rows that change runs: Claude's blocks, results, and what the person sends. */
-const DOORS = new Set(['response', 'tool-result', 'prompt', 'command', 'delivery'])
+const DOORS = ['response', 'tool-result', 'prompt', 'command', 'delivery'] as const
+
+/**
+ * How this mod learns of a swap, as its `signals` option picks: set by `register`, not here, as
+ * `classic.ts` imports `rebuild` from this file and so may be evaluated after it.
+ */
+let swaps!: Swaps
 
 function headline(list: readonly Call[]): string {
   const counts = new Map<string, number>()
@@ -196,20 +205,22 @@ function whole(value: unknown, draw: Draw, at: string): RenderNode {
   )
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // Whether Claude Code's `classic.*` hooks reach this mod: see `swaps.ts`.
+  const isGuarded = options.signals === 'guarded'
+  swaps = isGuarded ? guardedSwaps : classicSwaps
+  if (isGuarded) guarded(on)
+  else classic(on)
+
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     rebuild($)
     return result
   })
-  // `/resume`, `/clear` and a compaction change the conversation without a `session.start`.
-  on('classic.SessionStart', async ($, e, next) => {
-    const result = await next(e)
-    if (e.source !== 'startup') rebuild($)
-    return result
-  })
-  on('session.append', ($, e, next) => {
-    if (e.agentId === undefined && DOORS.has(e.door)) {
+  // Only these doors: the guard sends some others on past the mod, and says so each time.
+  on('session.append', { door: DOORS }, ($, e, next) => {
+    if (e.agentId === undefined) {
+      if (swaps.take()) rebuild($)
       const steps = appended(e.message)
       if (steps.length > 0) queue(() => write($, index, feed(index, steps)))
     }
@@ -237,6 +248,9 @@ export const register: Register = on => {
     return <Box />
   })
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    // A resumed conversation's rows draw before any of its rows is appended. Not while drawing: a
+    // drawing doesn't write state.
+    if (swaps.take()) $.clock.after(0, () => rebuild($))
     // ccs-bridge, beneath, sees an approval in the row's `isRunning`.
     const engine = await next(e)
     if (!e.viewport?.isFullscreen) return engine

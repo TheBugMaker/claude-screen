@@ -88,3 +88,11 @@ async fn dropping_hangs_up_the_program() {
     let status = exited(&mut events).await;
     assert_ne!(status, "exit 0");
 }
+
+#[tokio::test]
+async fn reads_the_text_between_two_cells() {
+    let (pty, mut events) = spawn("printf 'hello world\\nsecond line'");
+    assert_eq!(exited(&mut events).await, "exit 0");
+    assert_eq!(pty.text_between((0, 6), (1, 5)), "world\nsecond");
+    assert_eq!(pty.text_between((0, 0), (0, 4)), "hello");
+}

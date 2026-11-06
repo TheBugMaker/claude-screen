@@ -74,6 +74,18 @@ pub fn merging(dir: &Path) -> bool {
     git(dir, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok()
 }
 
+/// The files in `dir` that are in conflict.
+pub fn conflicted(dir: &Path) -> Vec<String> {
+    git(dir, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|files| files.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Gives up the merge under way in `dir`, as `git merge --abort`.
+pub fn abort_merge(dir: &Path) -> Result<(), String> {
+    git(dir, &["merge", "--abort"]).map(drop)
+}
+
 /// `commit` is in `branch`.
 pub fn contains(dir: &Path, commit: &str, branch: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", commit, branch]).is_ok()

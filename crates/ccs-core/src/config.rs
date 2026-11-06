@@ -61,6 +61,8 @@ pub struct Config {
     /// A new session starts in Claude's plan mode (`claude --permission-mode plan`). Resumed ones,
     /// and one opened to fix a merge's conflicts, start in your own default mode.
     pub plan: bool,
+    /// How the mods ccs gives Claude learn what Claude Code tells only its classic hooks.
+    pub signals: Signals,
     /// Peer tabs every session gets next to its Chat tab.
     #[serde(rename = "tab")]
     pub tabs: Vec<TabDef>,
@@ -83,9 +85,9 @@ pub struct MergeDef {
     /// the work is in, and `after` says what comes next.
     pub command: String,
     /// What to ask Claude when `command` stops on conflicts: `$CS_*` names are filled in. The
-    /// session's own Claude gets it for conflicts in its directory, a new merge session in the
-    /// main checkout for conflicts there, where leader m then commits the merge. Without it, a
-    /// conflict only gets a notice.
+    /// session's own Claude gets it for conflicts in its directory. For conflicts in the main
+    /// checkout, a new merge session there gets it in its prompt box, for you to edit or send,
+    /// and leader m there then commits the merge. Without it, a conflict only gets a notice.
     pub on_conflict: Option<String>,
     /// Values asked for in the panel, each set as `CS_<NAME>` for `commit`, `command` and
     /// `on_conflict`.
@@ -200,6 +202,21 @@ pub enum Mode {
     Regular,
 }
 
+/// How the mods ccs gives Claude (`mods/ccs-bridge`, `mods/ccs-traces`) learn what Claude Code
+/// tells only its classic hooks: that a permission dialog waits for you, that work left behind will
+/// wake Claude, that the conversation was swapped. Where an organization manages Claude Code, its
+/// guard keeps classic hooks from the mods a user installs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Signals {
+    /// From the classic hooks: exact, where they run.
+    #[default]
+    Classic,
+    /// Without them: a dialog is an ask still unanswered after 3 s, and work left behind goes
+    /// unseen.
+    Guarded,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -216,6 +233,7 @@ impl Default for Config {
             slide_ms: 150,
             worktree: true,
             plan: true,
+            signals: Signals::Classic,
             tabs: vec![
                 TabDef {
                     name: "review".into(),
@@ -458,6 +476,12 @@ mod tests {
         assert_eq!(config.slide_ms, 150);
         assert!(config.worktree);
         assert!(config.plan);
+        assert_eq!(config.signals, Signals::Classic);
+        assert_eq!(
+            Config::parse("signals = \"guarded\"").unwrap().signals,
+            Signals::Guarded
+        );
+        assert!(Config::parse("signals = \"loud\"").is_err());
         // It shows the default action and keys as they are.
         assert_eq!(config.merges, Config::default().merges);
         assert_eq!(config.keys, Config::default().keys);

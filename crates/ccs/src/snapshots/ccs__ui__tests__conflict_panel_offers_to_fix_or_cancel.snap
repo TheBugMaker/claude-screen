@@ -1,0 +1,20 @@
+---
+source: crates/ccs/src/ui.rs
+expression: terminal.backend()
+---
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"          ╭ Merge conflicts · worktree-rate-limits → main ───────────────────────────────╮          "
+"          │Merging worktree-rate-limits into main stopped on conflicts in /work/api:     │          "
+"          │                                                                              │          "
+"          │  src/limits.rs                                                               │          "
+"          │  Cargo.toml                                                                  │          "
+"          │                                                                              │          "
+"          │Enter opens a new session next to this one, where Claude fixes them for you to│          "
+"          │review.                                                                       │          "
+"          │Esc runs git merge --abort: nothing is merged, and this session stays as it   │          "
+"          │is.                                                                           │          "
+"          ╰ Enter start a session to fix it · Esc cancel the merge ──────────────────────╯          "
+"                                                                                                    "
+"                                                                                                    "

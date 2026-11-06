@@ -222,6 +222,7 @@ dependencies = [
 name = "ccs"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ccs-claude",
  "ccs-core",
  "ccs-term",

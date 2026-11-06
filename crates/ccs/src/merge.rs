@@ -40,6 +40,21 @@ pub struct MergePanel {
     pub finish: bool,
 }
 
+/// What asks you before a session opens to fix the conflicts a merge stopped on in the main
+/// checkout: Enter opens it, Esc gives the merge up.
+pub struct ConflictPanel {
+    /// The session merged, by key.
+    pub view: u64,
+    /// The branch it merged.
+    pub branch: String,
+    pub target: String,
+    pub repo: std::path::PathBuf,
+    /// The files in conflict.
+    pub files: Vec<String>,
+    /// What the session that opens starts with.
+    pub prompt: String,
+}
+
 /// A value the action picked in the panel asks for: one of its `params`.
 pub struct Param {
     pub name: String,

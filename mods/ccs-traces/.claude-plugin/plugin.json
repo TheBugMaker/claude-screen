@@ -3,5 +3,14 @@
   "version": "0.1.0",
   "description": "Folds each run of tool calls in the transcript into one line you can click open, down to a call's whole input and output",
   "author": { "name": "Ghassen" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "signals": {
+      "type": "string",
+      "title": "Signals",
+      "description": "classic folds a swapped conversation afresh from Claude Code's classic SessionStart hook. guarded, for where an organization manages Claude Code and its guard keeps that hook from the mod, does so from session.end and the swapped conversation's first row. ccs sets it from its own config's signals.",
+      "default": "classic",
+      "options": ["classic", "guarded"]
+    }
+  }
 }

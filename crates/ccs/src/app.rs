@@ -3,13 +3,14 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine, prelude::BASE64_STANDARD};
 use ccs_claude::{
     bridge::Bridge,
     history::{self, PastSession},
     session::{Session, State},
 };
 use ccs_core::{
-    config::{After, Config, Mode, TabDef},
+    config::{After, Config, Mode, Signals, TabDef},
     keys::{Action, Bindings},
 };
 use ccs_term::{Pty, PtyEvent};
@@ -17,8 +18,13 @@ use color_eyre::{
     Section, SectionExt,
     eyre::{OptionExt, WrapErr, eyre},
 };
-use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+use crossterm::{
+    event::{
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
+    },
+    execute,
+    style::Print,
 };
 use futures::StreamExt;
 use ratatui::{
@@ -32,7 +38,7 @@ use crate::{
     git,
     input::Input,
     keys,
-    merge::{self, MergePanel, Outcome, Place, Unmerged},
+    merge::{self, ConflictPanel, MergePanel, Outcome, Place, Unmerged},
     theme::ClaudeTheme,
     ui,
 };
@@ -100,6 +106,8 @@ pub struct App {
     quit_refused: Option<Instant>,
     /// When the last sideways scroll came, to take a swipe's many as one.
     last_swipe: Option<Instant>,
+    /// Text selected with the mouse, for the terminal to put on the clipboard.
+    copied: Option<String>,
     /// How the last Claude failed, when that is why ccs quits.
     failure: Option<color_eyre::Report>,
 }
@@ -129,6 +137,8 @@ pub struct View {
     pub tab: usize,
     /// The two tabs side by side when the screen is split; `tab` is one of them.
     pub split: Option<Split>,
+    /// Text selected with the mouse, shown until the next click, key or scroll.
+    pub selection: Option<Selection>,
     /// The last merge of the session's work (leader m).
     merge: Option<MergeRun>,
     /// An action with `after = "keep"` got its work in: its worktree stays when it closes.
@@ -142,6 +152,24 @@ pub struct Split {
     pub main: usize,
     /// On the right: the tab put beside it, whose place a split key takes.
     pub side: usize,
+}
+
+/// Text dragged over in a tab whose program doesn't take the mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub tab: usize,
+    /// Where the drag started and where it is now (row, column of the tab's screen), both in it.
+    pub from: (u16, u16),
+    pub to: (u16, u16),
+    /// The button is still down: the drag goes on.
+    pub held: bool,
+}
+
+impl Selection {
+    /// Its first and last cell, in reading order.
+    pub fn ends(&self) -> ((u16, u16), (u16, u16)) {
+        (self.from.min(self.to), self.from.max(self.to))
+    }
 }
 
 /// A merge of a session's work: its `[[merge]]` running in a tab, and what came of it.
@@ -435,6 +463,7 @@ impl Tab {
 pub enum Modal {
     Find(Finder),
     Merge(MergePanel),
+    Conflict(ConflictPanel),
 }
 
 /// A switch between sessions, drawn as the new one pushing the old one off the screen.
@@ -482,6 +511,7 @@ impl App {
             quit: false,
             quit_refused: None,
             last_swipe: None,
+            copied: None,
             failure: None,
         }
     }
@@ -552,13 +582,13 @@ impl App {
 
     /// Starts Claude in `repo`, resuming `past`, as a session not on screen yet. A new session
     /// gets a worktree of its own, if `worktree`, the config wants one and `repo` has a commit to
-    /// start from. Claude starts on `prompt`, if given.
+    /// start from. Claude starts with `draft` in its prompt box, if given, for you to send.
     fn spawn_view(
         &mut self,
         repo: PathBuf,
         past: Option<&PastSession>,
         worktree: bool,
-        prompt: Option<&str>,
+        draft: Option<&str>,
     ) -> color_eyre::Result<View> {
         let mut session = Session::default();
         // Known before Claude reports it, so the finder doesn't offer it again.
@@ -588,7 +618,7 @@ impl App {
             &repo,
             past.map(|p| p.id.as_str()),
             worktree.as_ref().map(|w| w.name.as_str()),
-            prompt,
+            draft,
         )?;
         self.next_key += 1;
         // A resumed session goes back to where it was, if that is still there: Claude goes back
@@ -609,6 +639,7 @@ impl App {
             tabs: Vec::new(),
             tab: 0,
             split: None,
+            selection: None,
             merge: None,
             keep_worktree: false,
         };
@@ -740,15 +771,16 @@ impl App {
     }
 
     /// Starts Claude in `cwd`, resuming `resume`, or in a new worktree `worktree`, with the
-    /// bridge mod reporting as session `key`, on `prompt` if given. Its terminal's events come
-    /// with `key` too. A new session without a prompt starts in plan mode, if the config wants it.
+    /// bridge mod reporting as session `key`, and putting `draft` in its prompt box if given. Its
+    /// terminal's events come with `key` too. A new session without a draft starts in plan mode,
+    /// if the config wants it.
     fn spawn_claude(
         &self,
         key: u64,
         cwd: &Path,
         resume: Option<&str>,
         worktree: Option<&str>,
-        prompt: Option<&str>,
+        draft: Option<&str>,
     ) -> color_eyre::Result<Tab> {
         let mut args = vec![CLAUDE.to_owned(), "--plugin-dir".into(), quoted(MODS)];
         let mut settings = serde_json::Map::new();
@@ -765,25 +797,25 @@ impl App {
             // From the commit checked out in `cwd`, the files you have, not the remote's.
             settings.insert("worktree".into(), serde_json::json!({ "baseRef": "head" }));
         }
+        if let Some(configs) = plugin_configs(self.config.signals) {
+            settings.insert("pluginConfigs".into(), configs);
+        }
         if !settings.is_empty() {
             let settings = serde_json::Value::Object(settings).to_string();
             args.extend(["--settings".into(), quoted(&settings)]);
         }
-        // A new session starts by planning. Not a resumed one, nor one Claude starts on a prompt:
-        // that is a merge's conflicts, for it to fix on its own.
-        if self.config.plan && resume.is_none() && prompt.is_none() {
+        // A new session starts by planning. Not a resumed one, nor one Claude starts with a draft:
+        // that is a merge's conflicts, for it to fix on its own once you send it.
+        if self.config.plan && resume.is_none() && draft.is_none() {
             args.extend(["--permission-mode".into(), "plan".into()]);
         }
         if let Some(id) = resume {
             args.extend(["--resume".into(), quoted(id)]);
         }
-        if let Some(prompt) = prompt {
-            args.push(quoted(prompt));
-        }
         let command = args.join(" ");
         let exe = std::env::current_exe().wrap_err("finding the ccs executable")?;
         let session = key.to_string();
-        let env = [
+        let mut env = vec![
             (
                 "CCS_EXE",
                 exe.to_str().ok_or_eyre("the ccs path is not UTF-8")?,
@@ -796,6 +828,10 @@ impl App {
             ),
             ("CCS_SESSION", session.as_str()),
         ];
+        // The bridge mod puts it in the prompt box, unsent.
+        if let Some(draft) = draft {
+            env.push(("CCS_DRAFT", draft));
+        }
         let size = ui::terminal_size(self.window);
         let pty = Pty::spawn(&command, cwd, &env, size, key, self.ptys.clone())?;
         Ok(Tab {
@@ -838,10 +874,39 @@ impl App {
         })
     }
 
-    /// The branch the merge that session `index` fixes goes into, while it is a merge session.
-    pub fn merge_session_target(&self, index: usize) -> Option<&str> {
-        let merged = self.fixed_by(self.views[index].key)?;
-        self.views[merged].merge.as_ref().map(|m| m.target.as_str())
+    /// While session `index` is a merge session: the name of the session whose merge it fixes,
+    /// and the branch that merge goes into.
+    pub fn merge_session(&self, index: usize) -> Option<(String, &str)> {
+        let merged = &self.views[self.fixed_by(self.views[index].key)?];
+        let target = merged.merge.as_ref()?.target.as_str();
+        Some((ui::session_name(merged), target))
+    }
+
+    /// What the chip of session `index` says: its name, but a merge session names the merge it
+    /// fixes from the start, and the session merged says it is merging.
+    pub fn chip_name(&self, index: usize) -> String {
+        let view = &self.views[index];
+        if let Some((merged, target)) = self.merge_session(index) {
+            return format!("merge {merged} → {target}");
+        }
+        let name = ui::session_name(view);
+        match self.role(view) {
+            Role::Merged => format!("{name} · merging"),
+            Role::Plain | Role::Fixing => name,
+        }
+    }
+
+    /// The sessions whose merge session is the one after them, which their chips join.
+    pub fn links(&self) -> Vec<usize> {
+        self.views
+            .iter()
+            .enumerate()
+            .filter_map(|(index, view)| {
+                let fixer = view.merge.as_ref()?.fixer.as_ref()?;
+                let next = self.views.get(index + 1)?;
+                (next.key == fixer.key).then_some(index)
+            })
+            .collect()
     }
 
     /// What `view` is to a merge that stopped on conflicts.
@@ -916,6 +981,14 @@ impl App {
             // Over: the session on screen is all there.
             self.slide.take_if(|s| s.started.elapsed() >= s.duration);
             terminal.draw(|frame| ui::render(frame, &mut self))?;
+            if let Some(text) = self.copied.take() {
+                // OSC 52: the terminal puts it on the clipboard.
+                let text = BASE64_STANDARD.encode(text);
+                execute!(
+                    terminal.backend_mut(),
+                    Print(format!("\x1b]52;c;{text}\x07"))
+                )?;
+            }
             let shown = self.views[self.active].key;
             tokio::select! {
                 event = terminal_events.next() => match event {
@@ -939,8 +1012,8 @@ impl App {
                         refresh_ai_title(&mut view.session, &view.cwd);
                     }
                 }
-                // The next frame of the slide. Output from a program can keep this from firing,
-                // but it redraws then anyway.
+                // The next frame of the slide, or of the chips of a merge session opening. Output
+                // from a program can keep this from firing, but it redraws then anyway.
                 () = tokio::time::sleep(FRAME), if self.slide.is_some() => {}
             }
             self.slide_from(shown);
@@ -1192,6 +1265,7 @@ impl App {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.notice = None;
+                self.views[self.active].selection = None;
                 self.on_key(key);
             }
             Event::Paste(text) => {
@@ -1206,6 +1280,7 @@ impl App {
                             panel.message.insert(&text);
                         }
                     }
+                    Some(Modal::Conflict(_)) => {}
                     None => {
                         if let Some(pty) = &mut self.views[self.active].terminal_mut().pty {
                             pty.paste(&text);
@@ -1214,74 +1289,7 @@ impl App {
                 }
             }
             // The popups cover the screen, so clicks and the wheel leave it alone.
-            Event::Mouse(mouse) if self.modal.is_none() => {
-                let at = Position::new(mouse.column, mouse.row);
-                // A click on a session's chip or a tab's title goes there, as the leader keys do.
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if let Some(index) = self.chip_areas.iter().position(|a| a.contains(at)) {
-                        self.active = index;
-                        return;
-                    }
-                    if let Some(tab) = self.tab_areas.iter().position(|a| a.contains(at)) {
-                        self.select_tab(tab);
-                        return;
-                    }
-                }
-                // Scrolling sideways, as a touchpad swipe does, goes to the session beside this one.
-                // So does Shift+scroll, as Ghostty on Linux keeps sideways scrolling for its tabs.
-                let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
-                let next = match mouse.kind {
-                    MouseEventKind::ScrollRight => Some(true),
-                    MouseEventKind::ScrollDown if shift => Some(true),
-                    MouseEventKind::ScrollLeft => Some(false),
-                    MouseEventKind::ScrollUp if shift => Some(false),
-                    _ => None,
-                };
-                if let Some(next) = next {
-                    let same_swipe = self.last_swipe.is_some_and(|t| t.elapsed() < SWIPE_GAP);
-                    self.last_swipe = Some(Instant::now());
-                    if !same_swipe {
-                        let last = self.views.len() - 1;
-                        self.active = if next {
-                            (self.active + 1).min(last)
-                        } else {
-                            self.active.saturating_sub(1)
-                        };
-                    }
-                    return;
-                }
-                let view = &mut self.views[self.active];
-                let shown = view.shown();
-                let panes = ui::pane_areas(self.window, shown.len());
-                // The tab under the pointer. Off the tabs, the wheel scrolls the one with your keys.
-                let pane = panes.iter().position(|a| a.contains(at));
-                let tab = pane.map_or(view.tab, |pane| shown[pane]);
-                let click = matches!(mouse.kind, MouseEventKind::Down(_));
-                // A click there gives it your keys too.
-                if pane.is_some() && click {
-                    view.tab = tab;
-                }
-                let Some(pty) = &mut view.tab_at_mut(tab).pty else {
-                    return;
-                };
-                // To the program if it asked for the mouse, else the wheel scrolls back.
-                if let Some(pane) = pane {
-                    let area = panes[pane];
-                    let at_screen = (at.x - area.x, at.y - area.y);
-                    if pty.mouse(mouse.kind, mouse.modifiers, at_screen) {
-                        // A click can answer Claude's permission dialog.
-                        if tab == 0 && click {
-                            view.last_key = Some((Instant::now(), Then::Advance));
-                        }
-                        return;
-                    }
-                }
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => pty.scroll_up(WHEEL_STEP.into()),
-                    MouseEventKind::ScrollDown => pty.scroll_down(WHEEL_STEP.into()),
-                    _ => {}
-                }
-            }
+            Event::Mouse(mouse) if self.modal.is_none() => self.on_mouse(mouse),
             // Hidden tabs and the spare too, so a program never draws for the wrong size.
             Event::Resize(width, height) => {
                 self.window = Rect::new(0, 0, width, height);
@@ -1291,6 +1299,141 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        let at = Position::new(mouse.column, mouse.row);
+        // A click on a session's chip or a tab's title goes there, as the leader keys do.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.views[self.active].selection = None;
+            if let Some(index) = self.chip_areas.iter().position(|a| a.contains(at)) {
+                self.active = index;
+                return;
+            }
+            if let Some(tab) = self.tab_areas.iter().position(|a| a.contains(at)) {
+                self.select_tab(tab);
+                return;
+            }
+        }
+        // Scrolling sideways, as a touchpad swipe does, goes to the session beside this one.
+        // So does Shift+scroll, as Ghostty on Linux keeps sideways scrolling for its tabs.
+        let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+        let next = match mouse.kind {
+            MouseEventKind::ScrollRight => Some(true),
+            MouseEventKind::ScrollDown if shift => Some(true),
+            MouseEventKind::ScrollLeft => Some(false),
+            MouseEventKind::ScrollUp if shift => Some(false),
+            _ => None,
+        };
+        if let Some(next) = next {
+            let same_swipe = self.last_swipe.is_some_and(|t| t.elapsed() < SWIPE_GAP);
+            self.last_swipe = Some(Instant::now());
+            if !same_swipe {
+                let last = self.views.len() - 1;
+                self.active = if next {
+                    (self.active + 1).min(last)
+                } else {
+                    self.active.saturating_sub(1)
+                };
+            }
+            return;
+        }
+        if self.drag_selection(mouse.kind, at) {
+            return;
+        }
+        let view = &mut self.views[self.active];
+        let shown = view.shown();
+        let panes = ui::pane_areas(self.window, shown.len());
+        // The tab under the pointer. Off the tabs, the wheel scrolls the one with your keys.
+        let pane = panes.iter().position(|a| a.contains(at));
+        let tab = pane.map_or(view.tab, |pane| shown[pane]);
+        let click = matches!(mouse.kind, MouseEventKind::Down(_));
+        // A click there gives it your keys too.
+        if pane.is_some() && click {
+            view.tab = tab;
+        }
+        // The selection's rows would move.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            view.selection = None;
+        }
+        let Some(pty) = &mut view.tab_at_mut(tab).pty else {
+            return;
+        };
+        // To the program if it asked for the mouse, else a drag selects text and the wheel
+        // scrolls back.
+        if let Some(pane) = pane {
+            let area = panes[pane];
+            let at_screen = (at.x - area.x, at.y - area.y);
+            if pty.mouse(mouse.kind, mouse.modifiers, at_screen) {
+                // A click can answer Claude's permission dialog.
+                if tab == 0 && click {
+                    view.last_key = Some((Instant::now(), Then::Advance));
+                }
+                return;
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let (column, row) = at_screen;
+                view.selection = Some(Selection {
+                    tab,
+                    from: (row, column),
+                    to: (row, column),
+                    held: true,
+                });
+                return;
+            }
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => pty.scroll_up(WHEEL_STEP.into()),
+            MouseEventKind::ScrollDown => pty.scroll_down(WHEEL_STEP.into()),
+            _ => {}
+        }
+    }
+
+    /// Moves the end of the text being selected in the session on screen to the pointer at `at`,
+    /// or, when the button comes up, puts that text on the clipboard. `false` when no drag
+    /// selects text, and the event is the caller's.
+    fn drag_selection(&mut self, kind: MouseEventKind, at: Position) -> bool {
+        let view = &mut self.views[self.active];
+        let Some(mut selection) = view.selection.filter(|s| s.held) else {
+            return false;
+        };
+        let up = match kind {
+            MouseEventKind::Drag(MouseButton::Left) => false,
+            MouseEventKind::Up(MouseButton::Left) => true,
+            _ => return false,
+        };
+        view.selection = None;
+        // It stays in its tab, wherever the pointer goes.
+        let shown = view.shown();
+        let Some(pane) = shown.iter().position(|&t| t == selection.tab) else {
+            return true;
+        };
+        let area = ui::pane_areas(self.window, shown.len())[pane];
+        selection.to = (
+            at.y.saturating_sub(area.y)
+                .min(area.height.saturating_sub(1)),
+            at.x.saturating_sub(area.x)
+                .min(area.width.saturating_sub(1)),
+        );
+        if up {
+            selection.held = false;
+            // A click selects nothing.
+            if selection.from == selection.to {
+                return true;
+            }
+            if let Some(pty) = &view.tab_at(selection.tab).pty {
+                let (start, end) = selection.ends();
+                let text = pty.text_between(start, end);
+                if !text.is_empty() {
+                    self.copied = Some(text);
+                }
+            }
+        }
+        view.selection = Some(selection);
+        true
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -1566,7 +1709,17 @@ impl App {
         match (merge::outcome(status, run.before, after), prompt) {
             (Outcome::Merged, _) => self.merged(index),
             (Outcome::Conflict(Place::Cwd), Some(prompt)) => self.prompt_claude(index, &prompt),
-            (Outcome::Conflict(Place::Repo), Some(prompt)) => self.open_fixer(index, &prompt),
+            (Outcome::Conflict(Place::Repo), Some(prompt)) => {
+                let branch = git::branch(&view.cwd).unwrap_or_default();
+                self.modal = Some(Modal::Conflict(ConflictPanel {
+                    view: view.key,
+                    branch,
+                    target: run.target.clone(),
+                    repo: view.repo.clone(),
+                    files: git::conflicted(&view.repo),
+                    prompt,
+                }));
+            }
             (Outcome::Conflict(place), None) => {
                 let dir = match place {
                     Place::Cwd => &view.cwd,
@@ -1662,36 +1815,55 @@ impl App {
         view
     }
 
-    /// Starts a merge session in the main checkout of session `index`, without a worktree, on
-    /// `prompt`, to fix the conflicts its merge stopped on there, for you to review and finish.
-    /// Both are busy until then: if you are on `index`, you go on to a session that needs you.
+    /// Starts a merge session in the main checkout of session `index`, without a worktree, with
+    /// `prompt` in its prompt box, to fix the conflicts its merge stopped on there, for you to
+    /// review and finish.
     fn open_fixer(&mut self, index: usize, prompt: &str) {
         let repo = self.views[index].repo.clone();
         let tip = git::head(&self.views[index].cwd).unwrap_or_default();
         match self.spawn_view(repo.clone(), None, false, Some(prompt)) {
-            Ok(fixer) => {
-                if let Some(run) = &mut self.views[index].merge {
-                    run.fixer = Some(Fixer {
-                        key: fixer.key,
-                        tip,
-                    });
-                }
-                let name = ui::session_name(&self.views[index]);
-                self.views.push(fixer);
-                let fixer = self.views.len();
-                self.notify(format!(
-                    "merging {name} stopped on conflicts: session {fixer} is fixing them"
-                ));
-                if self.active == index {
-                    self.advance();
-                }
-            }
+            Ok(fixer) => self.add_fixer(index, fixer, tip),
             Err(err) => self.notify(format!(
                 "starting a session to fix the conflicts failed: {err:#}; fix them in {}, or \
                  git merge --abort",
                 repo.display()
             )),
         }
+    }
+
+    /// Enter in the conflict panel: starts the session that fixes the conflicts.
+    fn fix_conflicts(&mut self, panel: &ConflictPanel) {
+        if let Some(index) = self.views.iter().position(|v| v.key == panel.view) {
+            self.open_fixer(index, &panel.prompt);
+        }
+    }
+
+    /// Esc in the conflict panel: gives the merge up, and leaves the session merged as it was.
+    fn cancel_merge(&mut self, panel: &ConflictPanel) {
+        match git::abort_merge(&panel.repo) {
+            Ok(()) => self.notify(format!("the merge into {} was cancelled", panel.target)),
+            Err(err) => self.notify(format!("cancelling the merge failed: {err}")),
+        }
+    }
+
+    /// Puts merge session `fixer` right after session `index`, whose merge stopped on the
+    /// conflicts in its main checkout that it fixes, the commit merged being `tip`. If you are on
+    /// `index`, you go to it, for its prompt.
+    fn add_fixer(&mut self, index: usize, fixer: View, tip: String) {
+        let at = index + 1;
+        if let Some(run) = &mut self.views[index].merge {
+            run.fixer = Some(Fixer {
+                key: fixer.key,
+                tip,
+            });
+        }
+        self.views.insert(at, fixer);
+        // The finder lists open sessions by their place, and those after it moved down.
+        if let Some(Modal::Find(finder)) = &mut self.modal {
+            finder.relist(&self.views);
+        }
+        // You asked for it in the conflict panel: you go to it.
+        self.active = at;
     }
 
     /// Types `text`, the prompt to fix the conflicts its merge stopped on in its directory, into
@@ -1844,6 +2016,22 @@ impl App {
     }
 
     fn on_modal_key(&mut self, key: KeyEvent) {
+        if matches!(self.modal, Some(Modal::Conflict(_))) {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(Modal::Conflict(panel)) = self.modal.take() {
+                        self.fix_conflicts(&panel);
+                    }
+                }
+                KeyCode::Esc => {
+                    if let Some(Modal::Conflict(panel)) = self.modal.take() {
+                        self.cancel_merge(&panel);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.modal = None;
             return;
@@ -2044,6 +2232,15 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
     }
 }
 
+/// The `--settings` `pluginConfigs` that give the mods `signals`, by the names in their
+/// plugin.json; `None` for `classic`, their default.
+fn plugin_configs(signals: Signals) -> Option<serde_json::Value> {
+    (signals == Signals::Guarded).then(|| {
+        let options = serde_json::json!({ "options": { "signals": "guarded" } });
+        serde_json::json!({ "ccs-bridge": options, "ccs-traces": options })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use ccs_claude::session::State::{Asleep, Idle, Starting, WaitingPermission, Working};
@@ -2052,9 +2249,31 @@ mod tests {
         keys::Key,
     };
     use crossterm::event::MouseEvent;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
     use super::*;
+
+    #[test]
+    fn guarded_signals_reach_both_mods_by_their_names() {
+        assert_eq!(plugin_configs(Signals::Classic), None);
+        let configs = plugin_configs(Signals::Guarded).unwrap();
+        for manifest in [
+            include_str!("../../../mods/ccs-bridge/.claude-plugin/plugin.json"),
+            include_str!("../../../mods/ccs-traces/.claude-plugin/plugin.json"),
+        ] {
+            let manifest: serde_json::Value = serde_json::from_str(manifest).unwrap();
+            let name = manifest["name"].as_str().unwrap();
+            assert_eq!(configs[name]["options"]["signals"], "guarded", "{name}");
+            // An option the mod declares, with that value among its options.
+            let field = &manifest["userConfig"]["signals"];
+            assert!(
+                field["options"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&"guarded".into())
+            );
+        }
+    }
 
     /// Where Enter goes from session `from` of sessions in `states`, none of them in a merge.
     fn next_plain(states: &[State], from: usize) -> Option<usize> {
@@ -2183,6 +2402,7 @@ mod tests {
             tabs: Vec::new(),
             tab: 0,
             split: None,
+            selection: None,
             merge: None,
             keep_worktree: false,
         }
@@ -2677,6 +2897,64 @@ mod tests {
         // Back to Chat.
         click(&mut app, 3, 1);
         assert_eq!(app.views[1].tab, 0);
+    }
+
+    #[test]
+    fn dragging_selects_text_in_its_tab_and_copies_it() {
+        let mut app = app();
+        app.window = Rect::new(0, 0, 80, 24);
+        let mut def = tab_def("out", Mode::Lazy);
+        def.command = "printf 'hello world\\nsecond line'; cat".into();
+        app.config.tabs = vec![def];
+        let mut view = view(0, std::env::temp_dir());
+        app.peer_tabs(&mut view);
+        app.views.push(view);
+        app.select_tab(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let pty = || app.views[0].tabs[0].pty.as_ref().unwrap();
+        while !pty().contents().contains("second line") {
+            assert!(std::time::Instant::now() < deadline, "{}", pty().contents());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mouse = |app: &mut App, kind, column, row| {
+            app.on_terminal(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let left = MouseButton::Left;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // The tab's screen starts on row 2, under the bars.
+        mouse(&mut app, MouseEventKind::Down(left), 6, 2);
+        mouse(&mut app, MouseEventKind::Drag(left), 5, 3);
+        terminal.draw(|frame| ui::render(frame, &mut app)).unwrap();
+        let reversed = |x, y| {
+            terminal.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed(5, 2) && reversed(6, 2) && reversed(79, 2));
+        assert!(reversed(0, 3) && reversed(5, 3) && !reversed(6, 3));
+        assert_eq!(app.copied, None);
+        mouse(&mut app, MouseEventKind::Up(left), 5, 3);
+        assert_eq!(app.copied.take().as_deref(), Some("world\nsecond"));
+        assert!(app.views[0].selection.is_some());
+        // Past the right edge, the drag stops at the tab's last column.
+        mouse(&mut app, MouseEventKind::Down(left), 0, 2);
+        mouse(&mut app, MouseEventKind::Drag(left), 200, 2);
+        mouse(&mut app, MouseEventKind::Up(left), 200, 2);
+        assert_eq!(app.views[0].selection.unwrap().to, (0, 79));
+        assert_eq!(app.copied.take().as_deref(), Some("hello world"));
+        // A key clears it.
+        app.on_terminal(Event::Key(KeyEvent::from(KeyCode::Char('x'))));
+        assert_eq!(app.views[0].selection, None);
+        // A click selects nothing.
+        mouse(&mut app, MouseEventKind::Down(left), 3, 2);
+        mouse(&mut app, MouseEventKind::Up(left), 3, 2);
+        assert_eq!(app.views[0].selection, None);
+        assert_eq!(app.copied, None);
     }
 
     #[test]
@@ -3261,8 +3539,19 @@ mod tests {
 
     /// Two sessions of a repository, the second on screen with a commit that conflicts with main,
     /// merged into the main checkout, where it stopped. No Claude starts to fix it, but a third
-    /// session is linked as the merge session that does.
+    /// session is linked as the merge session that does, and you are on it.
     fn conflict_in_main(name: &str) -> (App, PtyEvents, PathBuf, PathBuf) {
+        let (mut app, events, repo, tree) = stopped_in_main(name);
+        // A session fixing it, as one started with the conflict prompt would.
+        let tip = git::head(&tree).unwrap();
+        app.add_fixer(1, ready_view(2, &repo, &repo), tip);
+        assert_eq!(app.active, 2);
+        (app, events, repo, tree)
+    }
+
+    /// Two sessions of a repository, the second on screen with a commit that conflicts with main,
+    /// merged into the main checkout, where it stopped, with no session fixing it yet.
+    fn stopped_in_main(name: &str) -> (App, PtyEvents, PathBuf, PathBuf) {
         let (repo, tree) = merge_repo(name);
         let (mut app, mut events) = app_with_ptys();
         app.config.merges[0].on_conflict = None;
@@ -3282,11 +3571,67 @@ mod tests {
         );
         assert!(git::unmerged(&repo));
         assert_eq!(keys(&app), [0, 1]);
-        // A session fixing it, as one started with the conflict prompt would.
-        app.views.push(ready_view(2, &repo, &repo));
-        let tip = git::head(&tree).unwrap();
-        app.views[1].merge.as_mut().unwrap().fixer = Some(Fixer { key: 2, tip });
         (app, events, repo, tree)
+    }
+
+    #[test]
+    fn a_merge_session_opens_beside_the_session_merged_and_takes_you_there() {
+        let (mut app, _events, repo, tree) = stopped_in_main("beside");
+        app.views.push(ready_view(3, &repo, &repo));
+        let tip = git::head(&tree).unwrap();
+        app.add_fixer(1, ready_view(2, &repo, &repo), tip.clone());
+        // Right after the session merged, not at the end, and you are on it, with nothing over
+        // the hint that says what it is for.
+        assert_eq!(keys(&app), [0, 1, 2, 3]);
+        assert_eq!(app.active, 2);
+        assert_eq!(app.notice, None);
+        // Their chips say what they are from the start, joined.
+        assert_eq!(app.chip_name(1), "new · merging");
+        assert_eq!(app.chip_name(2), "merge new → main");
+        assert_eq!(app.chip_name(3), "new");
+        assert_eq!(app.links(), [1]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| ui::render(frame, &mut app)).unwrap();
+        let rule: String = (0..120)
+            .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+            .collect();
+        assert!(
+            rule.contains(
+                "fixing the merge conflicts of new into main: review the fix, then leader m \
+                 commits it"
+            ),
+            "{rule}"
+        );
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn a_conflict_in_main_asks_before_a_session_opens_and_esc_cancels_the_merge() {
+        let (mut app, mut events, repo, tree) = stopped_in_main("ask");
+        let files = git::conflicted(&repo);
+        assert_eq!(files, ["a.txt"]);
+        app.config.merges[0].on_conflict = Some("Fix it.".into());
+        // Run again, with a prompt: it stops on the same conflict, and asks.
+        run_git(&repo, &["merge", "--abort"]);
+        leader_key(&mut app, KeyCode::Char('m'));
+        merge(&mut app, &mut events);
+        assert!(
+            matches!(&app.modal, Some(Modal::Conflict(panel)) if panel.files == files && panel.target == "main"),
+            "no panel: {:?}",
+            app.notice
+        );
+        assert_eq!(keys(&app), [0, 1]);
+        // Esc: nothing is merged, and nothing opens.
+        app.on_modal_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert!(!git::merging(&repo) && !git::unmerged(&repo));
+        assert_eq!(keys(&app), [0, 1]);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("the merge into main was cancelled")
+        );
+        let _ = tree;
+        std::fs::remove_dir_all(&repo).unwrap();
     }
 
     #[test]
@@ -3304,7 +3649,7 @@ mod tests {
         app.on_bridge(2, Bridge::Idle);
         app.advance();
         assert_eq!(app.active, 2);
-        assert_eq!(app.merge_session_target(2), Some("main"));
+        assert_eq!(app.merge_session(2), Some(("new".to_owned(), "main")));
         // Leader m only finishes the merge, once nothing is in conflict.
         leader_key(&mut app, KeyCode::Char('m'));
         assert!(app.modal.is_none());

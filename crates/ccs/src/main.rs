@@ -89,9 +89,10 @@ async fn main() -> color_eyre::Result<()> {
     }));
     // Without bracketed paste, a pasted newline would submit the prompt.
     execute!(stdout(), EnableBracketedPaste)?;
-    // Mouse buttons in SGR encoding, for the wheel. Not EnableMouseCapture: its motion tracking
-    // would redraw on every mouse move. Shift+drag still selects text in most terminals.
-    execute!(stdout(), Print("\x1b[?1000h\x1b[?1006h"))?;
+    // Mouse buttons, and moves while one is held, in SGR encoding: for the wheel and for selecting
+    // text in a tab. Not EnableMouseCapture: its tracking of every move would redraw on each one.
+    // The terminal's own selection is still there with a modifier: Option in iTerm2, else Shift.
+    execute!(stdout(), Print("\x1b[?1002h\x1b[?1006h"))?;
     // Without the kitty keyboard protocol, Ctrl+digit arrives as a plain digit (or not at all).
     // Terminals that don't support it ignore this.
     execute!(
@@ -117,7 +118,7 @@ fn project_root(dir: &Path) -> PathBuf {
 fn leave_modes() {
     let _ = execute!(
         stdout(),
-        Print("\x1b[?1006l\x1b[?1000l"),
+        Print("\x1b[?1006l\x1b[?1002l"),
         PopKeyboardEnhancementFlags,
         DisableBracketedPaste
     );

@@ -2,5 +2,14 @@
   "name": "ccs-bridge",
   "version": "0.1.0",
   "description": "Reports what an interactive Claude Code session does to the claude-screen (ccs) that runs it",
-  "author": { "name": "Ghassen" }
+  "author": { "name": "Ghassen" },
+  "userConfig": {
+    "signals": {
+      "type": "string",
+      "title": "Signals",
+      "description": "classic learns of dialogs and of work left behind from Claude Code's classic hooks. guarded, for where an organization manages Claude Code and its guard keeps those hooks from the mod, learns of dialogs from tool.check instead, and never of work left behind. ccs sets it from its own config's signals.",
+      "default": "classic",
+      "options": ["classic", "guarded"]
+    }
+  }
 }

@@ -66,6 +66,15 @@ worktree = true
 # Resumed sessions, and one opened to fix a merge's conflicts, start in your own default mode.
 plan = true
 
+# How the mods ccs gives Claude learn that a permission dialog waits for you, that work Claude left
+# in the background will wake it, and that /clear or /resume swapped the conversation: Claude Code
+# tells only its classic hooks. Where an organization manages Claude Code (managed settings, or a
+# Team or Enterprise login), its guard keeps those hooks from the mods you install, and each skipped
+# hook says so in the transcript. There, "guarded" learns without them: a session counts as waiting
+# once an ask is still unanswered after 3 s, and one asleep on background work shows as idle, so the
+# merge panel no longer stops you from closing it.
+signals = "classic"
+
 # What each key does: one key, or a list of them. List only the actions you change; the others
 # keep the keys below, and [] leaves one without a key. No two can have the same key, but for
 # rerun_tab and the submit_* ones: they never work in the same tab.
@@ -137,10 +146,13 @@ command = "lazygit"
 #                after git branch -m, ask git (git branch --show-current)
 #   on_conflict  when the command stops on conflicts, the prompt for the Claude that fixes
 #                them, with $CS_* names filled in: the session's own Claude for conflicts in its
-#                directory, a new merge session in the main checkout for conflicts there. You
-#                review its fix, and leader m in it commits the merge; then both close. While
-#                Claude fixes them you go on to a session that needs you, and Enter takes you
-#                back there first once it is done. Without it, a conflict only gets a notice
+#                directory, a new merge session in the main checkout for conflicts there. The
+#                merge session opens right after the session merged, and if you were on that
+#                one it takes you there, with the prompt in Claude's prompt box for you to edit
+#                or send. You review its fix, and leader m in it commits the merge; then both
+#                close. While Claude fixes them you go on to a session that needs you, and Enter
+#                takes you back there first once it is done. Without it, a conflict only gets a
+#                notice
 #   params       values the panel asks for, each set as CS_<NAME>, trimmed, for commit, command
 #                and on_conflict: [{ name = "ticket", prompt = "ADO ticket", default = "" }].
 #                The name is lowercase letters, digits and _, and not one of the variables

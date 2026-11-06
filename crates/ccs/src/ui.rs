@@ -9,15 +9,15 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Constraint, Layout, Margin, Position, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 use crate::{
-    app::{App, Modal, Tab, View},
+    app::{App, Modal, Selection, Tab, View},
     finder::{Finder, Target},
-    merge::MergePanel,
+    merge::{ConflictPanel, MergePanel},
     theme,
 };
 
@@ -25,7 +25,6 @@ use crate::{
 const TAB_GAP: &str = " ── ";
 /// The most changed files the merge panel lists.
 const MERGE_CHANGES: usize = 8;
-
 /// The rows of the screen: session bar, tab rule, terminal, bottom rule.
 fn layout(area: Rect) -> [Rect; 4] {
     Layout::vertical([
@@ -78,6 +77,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     for (&index, &area) in shown.iter().zip(&panes) {
         render_pane(frame, view, index, area, focused && index == view.tab);
     }
+    if let Some(selection) = view.selection
+        && let Some(pane) = shown.iter().position(|&t| t == selection.tab)
+    {
+        highlight(frame.buffer_mut(), panes[pane], selection);
+    }
     draw_divider(frame.buffer_mut(), &panes);
     if let Some((from, moved, forward)) = slide {
         render_slide(frame.buffer_mut(), window, from, moved, forward);
@@ -86,12 +90,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let merge = view
         .on_merge_tab()
         .then(|| key_hint(&app.config, Action::Merge));
-    let left = match app.merge_session_target(app.active) {
-        // Nothing else says what leader m does in a merge session.
-        Some(target) if notice.is_none() && view.tab == 0 => {
+    let left = match app.merge_session(app.active) {
+        // Nothing else says what the session is for, and what leader m does in it.
+        Some((name, target)) if notice.is_none() && view.tab == 0 => {
             let merge = key_hint(&app.config, Action::Merge);
             Line::from(format!(
-                "merge into {target}: review it, then {merge} commits it"
+                "fixing the merge conflicts of {name} into {target}: review the fix, then {merge} \
+                 commits it"
             ))
             .fg(theme::get().dim)
         }
@@ -118,6 +123,30 @@ fn render_pane(frame: &mut Frame, view: &View, tab: usize, area: Rect, focused: 
             area,
         ),
         (None, None) => {}
+    }
+}
+
+/// The text `selection` covers in its tab's `area`, reversed as terminals show theirs. Nothing
+/// until the drag leaves the cell it started in.
+fn highlight(buffer: &mut Buffer, area: Rect, selection: Selection) {
+    if selection.from == selection.to {
+        return;
+    }
+    let ((first_row, first_col), (last_row, last_col)) = selection.ends();
+    let last_row = last_row.min(area.height.saturating_sub(1));
+    let right = area.width.saturating_sub(1);
+    for row in first_row..=last_row {
+        let from = if row == first_row { first_col } else { 0 };
+        let to = if row == last_row {
+            last_col.min(right)
+        } else {
+            right
+        };
+        for col in from..=to {
+            if let Some(cell) = buffer.cell_mut((area.x + col, area.y + row)) {
+                cell.modifier.insert(Modifier::REVERSED);
+            }
+        }
     }
 }
 
@@ -189,9 +218,10 @@ fn render_header(frame: &mut Frame, app: &App, bar: Rect, tabs: Rect) -> (Vec<Re
     let sessions: Vec<(String, State)> = app
         .views
         .iter()
-        .map(|view| (session_name(view), view.session.state()))
+        .enumerate()
+        .map(|(index, view)| (app.chip_name(index), view.session.state()))
         .collect();
-    let chips = render_session_bar(frame, bar, &sessions, app.active);
+    let chips = render_session_bar(frame, bar, &sessions, app.active, &app.links());
     let view = &app.views[app.active];
     let other = view.shown().into_iter().find(|&tab| tab != view.tab);
     let titles = render_tab_bar(
@@ -231,8 +261,61 @@ fn render_modal(frame: &mut Frame, app: &mut App) {
             let actions: Vec<&str> = app.config.merges.iter().map(|m| m.name.as_str()).collect();
             render_merge(frame, panel, &actions);
         }
+        Some(Modal::Conflict(panel)) => render_conflict(frame, panel),
         None => {}
     }
+}
+
+/// What asks before a session opens to fix the conflicts a merge stopped on: what stopped, which
+/// files, and the two ways out.
+fn render_conflict(frame: &mut Frame, panel: &ConflictPanel) {
+    let theme = theme::get();
+    let block = theme::popup(format!(
+        " Merge conflicts · {} → {} ",
+        panel.branch, panel.target
+    ))
+    .title_bottom(
+        Line::from(" Enter start a session to fix it · Esc cancel the merge ").fg(theme.dim),
+    );
+    let mut lines = vec![
+        Line::raw(format!(
+            "Merging {} into {} stopped on conflicts in {}:",
+            panel.branch,
+            panel.target,
+            panel.repo.display()
+        )),
+        Line::raw(""),
+    ];
+    for file in panel.files.iter().take(MERGE_CHANGES) {
+        lines.push(Line::raw(format!("  {file}")).fg(theme.dim));
+    }
+    if panel.files.len() > MERGE_CHANGES {
+        lines.push(
+            Line::raw(format!("  … {} more", panel.files.len() - MERGE_CHANGES)).fg(theme.dim),
+        );
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "Enter opens a new session next to this one, where Claude fixes them for you to review.",
+    ));
+    lines.push(Line::raw(
+        "Esc runs git merge --abort: nothing is merged, and this session stays as it is.",
+    ));
+    let width = (frame.area().width / 5 * 4).min(100);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    // Each line wraps in the room the panel has.
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(inner).max(1))
+        .sum();
+    let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+    let area = frame
+        .area()
+        .centered(Constraint::Length(width), Constraint::Length(height));
+    frame.render_widget(Clear, area);
+    let body = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
 }
 
 /// The merge panel over everything else: what leader m takes, the commit message when there is
@@ -536,35 +619,52 @@ fn render_finder(frame: &mut Frame, finder: &mut Finder, states: &[State]) {
 }
 
 /// The sessions as chips, the one on screen filled, and on the right how many others need you.
-/// `sessions` are names and states. Returns where each chip went.
+/// `sessions` are names and states. A rule joins each session in `links` to its merge session
+/// after it: `links` are where the sessions merged are. Returns where each chip went.
 fn render_session_bar(
     frame: &mut Frame,
     area: Rect,
     sessions: &[(String, State)],
     active: usize,
+    links: &[usize],
 ) -> Vec<Rect> {
     let mut chips = Vec::new();
     // Where each chip starts in the bar, and its width.
     let mut bounds = Vec::new();
     let mut x = 0;
     for (i, (name, state)) in sessions.iter().enumerate() {
-        let first = chips.len();
         let (glyph, color) = state_glyph(*state);
-        if i == active {
+        let mut chip = if i == active {
             let style = Style::new()
                 .bg(theme::get().accent)
                 .fg(theme::get().on_accent)
                 .bold();
-            chips.push(Span::styled(format!(" {} {glyph} {name} ", i + 1), style));
+            vec![Span::styled(format!(" {} {glyph} {name} ", i + 1), style)]
         } else {
-            chips.push(Span::raw(format!(" {} ", i + 1)).fg(theme::get().dim));
-            chips.push(Span::raw(glyph).fg(color));
-            chips.push(Span::raw(format!(" {name} ")));
+            vec![
+                Span::raw(format!(" {} ", i + 1)).fg(theme::get().dim),
+                Span::raw(glyph).fg(color),
+                Span::raw(format!(" {name} ")),
+            ]
+        };
+        // Joined to the session before, whose merge session it is.
+        let merging = i
+            .checked_sub(1)
+            .is_some_and(|merged| links.contains(&merged));
+        // Between it and the chip before: a gap, or a rule from the session it merges.
+        if i > 0 {
+            let gap = if merging {
+                Span::raw("━").fg(theme::get().accent)
+            } else {
+                Span::raw(" ")
+            };
+            chip.insert(0, gap);
         }
-        let width: usize = chips[first..].iter().map(Span::width).sum();
-        bounds.push((x, width));
-        x += width + 1;
-        chips.push(Span::raw(" "));
+        let gap = usize::from(i > 0);
+        let width: usize = chip.iter().map(Span::width).sum();
+        bounds.push((x + gap, width.saturating_sub(gap)));
+        x += width;
+        chips.extend(chip);
     }
 
     let others = |wanted: State| {
@@ -987,7 +1087,7 @@ mod tests {
         ];
         let mut chips = Vec::new();
         let terminal = draw(80, 1, |frame| {
-            chips = render_session_bar(frame, frame.area(), &sessions, 1);
+            chips = render_session_bar(frame, frame.area(), &sessions, 1, &[]);
         });
         insta::assert_snapshot!(terminal.backend());
         // Clicks find each chip where it is drawn, the cut one too.
@@ -1002,9 +1102,47 @@ mod tests {
         );
         // Chips past the end are nowhere.
         let terminal = draw(30, 1, |frame| {
-            chips = render_session_bar(frame, frame.area(), &sessions, 1);
+            chips = render_session_bar(frame, frame.area(), &sessions, 1, &[]);
         });
         assert_eq!(texts(&terminal, &chips), [" 1 ◐ c", "", "", ""]);
+    }
+
+    #[test]
+    fn a_merge_session_stays_joined_to_the_session_it_merges() {
+        let sessions = [
+            ("docs".to_owned(), State::Idle),
+            ("rate-limits · merging".to_owned(), State::Idle),
+            ("merge rate-limits → main".to_owned(), State::Starting),
+            ("web".to_owned(), State::Idle),
+        ];
+        let mut chips = Vec::new();
+        let terminal = draw(100, 1, |frame| {
+            chips = render_session_bar(frame, frame.area(), &sessions, 2, &[1]);
+        });
+        insta::assert_snapshot!("merge_session_joined", terminal.backend());
+        assert_eq!(
+            texts(&terminal, &chips),
+            [
+                " 1 ○ docs ",
+                " 2 ○ rate-limits · merging ",
+                " 3 ◌ merge rate-limits → main ",
+                " 4 ○ web "
+            ]
+        );
+    }
+
+    #[test]
+    fn conflict_panel_offers_to_fix_or_cancel() {
+        let panel = ConflictPanel {
+            view: 1,
+            branch: "worktree-rate-limits".into(),
+            target: "main".into(),
+            repo: "/work/api".into(),
+            files: vec!["src/limits.rs".into(), "Cargo.toml".into()],
+            prompt: String::new(),
+        };
+        let terminal = draw(100, 16, |frame| render_conflict(frame, &panel));
+        insta::assert_snapshot!("conflict_panel_offers_to_fix_or_cancel", terminal.backend());
     }
 
     /// The text drawn in each of `areas`.
